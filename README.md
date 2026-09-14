@@ -162,11 +162,7 @@ For the README results table, measure:
 | False stops | Stops during five clear-path runs | 0 |
 | Reset safety | Reset attempts accepted while obstacle remains | 0 |
 
-Do not claim these targets as results until they are measured on your machine.
-
-## Interview explanation
-
-"I built a two-node ROS 2 safety layer for a mobile robot. A testable C++ node filters lidar ranges within a configurable forward field of view and publishes a latched stop state using transient-local QoS. A Python velocity guard isolates the robot from Nav2 or teleop commands and outputs zero velocity during a stop. I verified edge cases with unit tests and measured response latency using rosbag data."
+Do not claim these targets as results until they are measured on your machine."
 
 ## Next implementation parts
 
