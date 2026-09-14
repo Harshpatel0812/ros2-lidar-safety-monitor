@@ -1,0 +1,5 @@
+safety_monitor:
+  ros__parameters:
+    stop_distance: 0.45
+    release_distance: 0.60
+    field_of_view_degrees: 60.0
