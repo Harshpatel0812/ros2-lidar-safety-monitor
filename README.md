@@ -162,8 +162,6 @@ For the README results table, measure:
 | False stops | Stops during five clear-path runs | 0 |
 | Reset safety | Reset attempts accepted while obstacle remains | 0 |
 
-Do not claim these targets as results until they are measured on your machine."
-
 ## Next implementation parts
 
 1. Add stale-sensor detection and stop if `/scan` is missing.
