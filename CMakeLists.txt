@@ -33,11 +33,28 @@ install(PROGRAMS
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
   ament_lint_auto_find_test_dependencies()
 
-  ament_add_gtest(test_safety_logic test/test_safety_logic.cpp)
-  target_include_directories(test_safety_logic PRIVATE include)
-  target_compile_features(test_safety_logic PUBLIC cxx_std_17)
-endif()
+  ament_add_gtest(
+    test_safety_logic
+    test/test_safety_logic.cpp
+    )
+
+  target_include_directories(
+    test_safety_logic
+    PRIVATE include
+    )
+
+  target_compile_features(
+    test_safety_logic
+    PUBLIC cxx_std_17
+    )
+
+  add_launch_test(
+    test/test_watchdog_launch.py
+    TIMEOUT 30)
+  endif()
 
 ament_package()
