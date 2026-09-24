@@ -21,34 +21,100 @@
 
 namespace
 {
+
 constexpr float kPi = 3.14159265358979323846F;
 
 float evaluate(const std::vector<float> & ranges)
 {
   return robot_safety_monitor::minimum_range_in_sector(
-    ranges, -kPi / 2.0F, kPi / 4.0F, 0.1F, 10.0F, kPi / 4.0F);
+    ranges,
+    -kPi / 2.0F,
+    kPi / 4.0F,
+    0.1F,
+    10.0F,
+    kPi / 4.0F);
 }
+
+double dynamic_distance(const double speed)
+{
+  return robot_safety_monitor::calculate_dynamic_stop_distance(
+    0.45,
+    speed,
+    0.20,
+    0.80,
+    1.50);
+}
+
 }  // namespace
 
 TEST(SafetyLogic, FindsClosestFrontalObstacle)
 {
-  EXPECT_FLOAT_EQ(evaluate({3.0F, 2.0F, 0.4F, 1.0F, 3.0F}), 0.4F);
+  EXPECT_FLOAT_EQ(
+    evaluate({3.0F, 2.0F, 0.4F, 1.0F, 3.0F}),
+    0.4F);
 }
 
 TEST(SafetyLogic, IgnoresObstacleOutsideFieldOfView)
 {
-  EXPECT_FLOAT_EQ(evaluate({0.2F, 2.0F, 3.0F, 2.0F, 0.3F}), 2.0F);
+  EXPECT_FLOAT_EQ(
+    evaluate({0.2F, 2.0F, 3.0F, 2.0F, 0.3F}),
+    2.0F);
 }
 
 TEST(SafetyLogic, IgnoresInvalidRanges)
 {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  const float infinity = std::numeric_limits<float>::infinity();
-  EXPECT_FLOAT_EQ(evaluate({nan, nan, 1.0F, 0.05F, infinity}), 1.0F);
+  const float nan =
+    std::numeric_limits<float>::quiet_NaN();
+
+  const float infinity =
+    std::numeric_limits<float>::infinity();
+
+  EXPECT_FLOAT_EQ(
+    evaluate({nan, nan, 1.0F, 0.05F, infinity}),
+    1.0F);
 }
 
 TEST(SafetyLogic, ReturnsInfinityWhenNoValidReadingExists)
 {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  EXPECT_TRUE(std::isinf(evaluate({nan, nan, nan, nan, nan})));
+  const float nan =
+    std::numeric_limits<float>::quiet_NaN();
+
+  EXPECT_TRUE(
+    std::isinf(
+      evaluate({nan, nan, nan, nan, nan})));
+}
+
+TEST(DynamicStopDistance, ReturnsBaseDistanceAtZeroSpeed)
+{
+  EXPECT_DOUBLE_EQ(dynamic_distance(0.0), 0.45);
+}
+
+TEST(DynamicStopDistance, TreatsReverseSpeedAsZero)
+{
+  EXPECT_DOUBLE_EQ(dynamic_distance(-0.50), 0.45);
+}
+
+TEST(DynamicStopDistance, IncludesReactionAndBrakingDistance)
+{
+  const double expected =
+    0.45 +
+    (0.50 * 0.20) +
+    ((0.50 * 0.50) / (2.0 * 0.80));
+
+  EXPECT_NEAR(
+    dynamic_distance(0.50),
+    expected,
+    1.0e-9);
+}
+
+TEST(DynamicStopDistance, IncreasesAsForwardSpeedIncreases)
+{
+  EXPECT_GT(
+    dynamic_distance(0.50),
+    dynamic_distance(0.20));
+}
+
+TEST(DynamicStopDistance, RespectsMaximumDistance)
+{
+  EXPECT_DOUBLE_EQ(dynamic_distance(3.0), 1.50);
 }

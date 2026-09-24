@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "geometry_msgs/msg/twist.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -38,7 +39,8 @@ public:
   : Node("safety_monitor"),
     stop_latched_(true),
     received_scan_(false),
-    last_minimum_(std::numeric_limits<float>::infinity())
+    last_minimum_(std::numeric_limits<float>::infinity()),
+    commanded_forward_speed_(0.0)
   {
     stop_distance_ =
       declare_parameter<double>("stop_distance", 0.45);
@@ -52,7 +54,17 @@ public:
     scan_timeout_ =
       declare_parameter<double>("scan_timeout", 0.50);
 
+    reaction_time_ =
+      declare_parameter<double>("reaction_time", 0.25);
+
+    braking_deceleration_ =
+      declare_parameter<double>("braking_deceleration", 0.80);
+
+    max_stop_distance_ =
+      declare_parameter<double>("max_stop_distance", 1.50);
+
     constexpr double pi = 3.14159265358979323846;
+
     half_field_of_view_rad_ =
       field_of_view_degrees * pi / 360.0;
 
@@ -71,16 +83,39 @@ public:
         "scan_timeout must be greater than zero");
     }
 
-    auto stop_qos =
+    if (reaction_time_ < 0.0) {
+      throw std::invalid_argument(
+        "reaction_time must not be negative");
+    }
+
+    if (braking_deceleration_ <= 0.0) {
+      throw std::invalid_argument(
+        "braking_deceleration must be greater than zero");
+    }
+
+    if (max_stop_distance_ < stop_distance_) {
+      throw std::invalid_argument(
+        "max_stop_distance must be greater than or equal to "
+        "stop_distance");
+    }
+
+    auto state_qos =
       rclcpp::QoS(1).reliable().transient_local();
 
     stop_publisher_ =
       create_publisher<std_msgs::msg::Bool>(
-        "/safety/stop", stop_qos);
+        "/safety/stop",
+        state_qos);
 
     clearance_publisher_ =
       create_publisher<std_msgs::msg::Float32>(
-        "/safety/min_clearance", 10);
+        "/safety/min_clearance",
+        10);
+
+    active_stop_distance_publisher_ =
+      create_publisher<std_msgs::msg::Float32>(
+        "/safety/active_stop_distance",
+        state_qos);
 
     scan_subscription_ =
       create_subscription<sensor_msgs::msg::LaserScan>(
@@ -88,6 +123,15 @@ public:
         rclcpp::SensorDataQoS(),
         std::bind(
           &SafetyMonitor::scan_callback,
+          this,
+          _1));
+
+    velocity_subscription_ =
+      create_subscription<geometry_msgs::msg::Twist>(
+        "/cmd_vel_raw",
+        10,
+        std::bind(
+          &SafetyMonitor::velocity_callback,
           this,
           _1));
 
@@ -108,15 +152,26 @@ public:
           this));
 
     publish_stop_state();
+    publish_active_stop_distance();
 
     RCLCPP_INFO(
       get_logger(),
-      "Safety monitor ready: stop=%.2f m, release=%.2f m, "
-      "FOV=%.1f deg, scan timeout=%.2f s",
+      "Safety monitor ready: base stop=%.2f m, "
+      "base release=%.2f m, FOV=%.1f deg, "
+      "scan timeout=%.2f s",
       stop_distance_,
       release_distance_,
       field_of_view_degrees,
       scan_timeout_);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Dynamic stopping: reaction=%.2f s, "
+      "braking deceleration=%.2f m/s^2, "
+      "maximum stop distance=%.2f m",
+      reaction_time_,
+      braking_deceleration_,
+      max_stop_distance_);
 
     RCLCPP_WARN(
       get_logger(),
@@ -125,6 +180,51 @@ public:
   }
 
 private:
+  double active_stop_distance() const
+  {
+    return robot_safety_monitor::calculate_dynamic_stop_distance(
+      stop_distance_,
+      commanded_forward_speed_,
+      reaction_time_,
+      braking_deceleration_,
+      max_stop_distance_);
+  }
+
+  double active_release_distance() const
+  {
+    const double hysteresis_margin =
+      release_distance_ - stop_distance_;
+
+    return active_stop_distance() + hysteresis_margin;
+  }
+
+  void publish_active_stop_distance()
+  {
+    std_msgs::msg::Float32 message;
+
+    message.data =
+      static_cast<float>(active_stop_distance());
+
+    active_stop_distance_publisher_->publish(message);
+  }
+
+  void velocity_callback(
+    const geometry_msgs::msg::Twist::SharedPtr command)
+  {
+    commanded_forward_speed_ = command->linear.x;
+
+    publish_active_stop_distance();
+
+    if (
+      scan_is_fresh() &&
+      std::isfinite(last_minimum_) &&
+      last_minimum_ <= active_stop_distance())
+    {
+      latch_stop(
+        "Obstacle entered the dynamic stopping zone.");
+    }
+  }
+
   void scan_callback(
     const sensor_msgs::msg::LaserScan::SharedPtr scan)
   {
@@ -144,13 +244,16 @@ private:
     clearance_message.data = last_minimum_;
     clearance_publisher_->publish(clearance_message);
 
+    publish_active_stop_distance();
+
     if (!std::isfinite(last_minimum_)) {
       latch_stop("No valid lidar ranges were found.");
       return;
     }
 
-    if (last_minimum_ <= stop_distance_) {
-      latch_stop("Obstacle entered the stopping zone.");
+    if (last_minimum_ <= active_stop_distance()) {
+      latch_stop(
+        "Obstacle entered the dynamic stopping zone.");
     }
   }
 
@@ -206,7 +309,7 @@ private:
       return;
     }
 
-    if (last_minimum_ < release_distance_) {
+    if (last_minimum_ < active_release_distance()) {
       response->success = false;
       response->message =
         "Reset rejected: obstacle remains inside "
@@ -244,10 +347,14 @@ private:
 
   float last_minimum_;
 
+  double commanded_forward_speed_;
   double stop_distance_;
   double release_distance_;
   double half_field_of_view_rad_;
   double scan_timeout_;
+  double reaction_time_;
+  double braking_deceleration_;
+  double max_stop_distance_;
 
   rclcpp::Time last_scan_time_;
 
@@ -257,8 +364,14 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr
     clearance_publisher_;
 
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr
+    active_stop_distance_publisher_;
+
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr
     scan_subscription_;
+
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr
+    velocity_subscription_;
 
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
     reset_service_;
