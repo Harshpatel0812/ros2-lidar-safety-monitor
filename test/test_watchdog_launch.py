@@ -23,9 +23,9 @@ import launch_testing.actions
 import pytest
 import rclpy
 from rclpy.qos import DurabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
-from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
@@ -34,18 +34,18 @@ from std_srvs.srv import Trigger
 @pytest.mark.launch_test
 def generate_test_description():
     safety_monitor = launch_ros.actions.Node(
-        package="robot_safety_monitor",
-        executable="safety_monitor_node",
-        name="safety_monitor",
+        package='robot_safety_monitor',
+        executable='safety_monitor_node',
+        name='safety_monitor',
         parameters=[
             {
-                "stop_distance": 0.45,
-                "release_distance": 0.60,
-                "field_of_view_degrees": 60.0,
-                "scan_timeout": 0.30,
+                'stop_distance': 0.45,
+                'release_distance': 0.60,
+                'field_of_view_degrees': 60.0,
+                'scan_timeout': 0.30,
             }
         ],
-        output="screen",
+        output='screen',
     )
 
     return (
@@ -55,7 +55,7 @@ def generate_test_description():
                 launch_testing.actions.ReadyToTest(),
             ]
         ),
-        {"safety_monitor": safety_monitor},
+        {'safety_monitor': safety_monitor},
     )
 
 
@@ -64,11 +64,11 @@ class TestWatchdogIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rclpy.init()
-        cls.node = rclpy.create_node("watchdog_integration_test")
+        cls.node = rclpy.create_node('watchdog_integration_test')
 
         cls.scan_publisher = cls.node.create_publisher(
             LaserScan,
-            "/scan",
+            '/scan',
             qos_profile_sensor_data,
         )
 
@@ -80,14 +80,14 @@ class TestWatchdogIntegration(unittest.TestCase):
 
         cls.stop_subscription = cls.node.create_subscription(
             Bool,
-            "/safety/stop",
+            '/safety/stop',
             cls.stop_callback,
             stop_qos,
         )
 
         cls.reset_client = cls.node.create_client(
             Trigger,
-            "/safety/reset",
+            '/safety/reset',
         )
 
     @classmethod
@@ -113,7 +113,7 @@ class TestWatchdogIntegration(unittest.TestCase):
     def publish_clear_scan(self):
         message = LaserScan()
         message.header.stamp = self.node.get_clock().now().to_msg()
-        message.header.frame_id = "test_laser"
+        message.header.frame_id = 'test_laser'
 
         message.angle_min = -math.pi / 2.0
         message.angle_max = math.pi / 2.0
@@ -182,6 +182,6 @@ class TestWatchdogIntegration(unittest.TestCase):
 
         self.assertFalse(stale_reset_response.success)
         self.assertIn(
-            "missing or stale",
+            'missing or stale',
             stale_reset_response.message,
         )

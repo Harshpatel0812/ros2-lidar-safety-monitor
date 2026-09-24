@@ -34,17 +34,53 @@ inline float minimum_range_in_sector(
   float minimum = std::numeric_limits<float>::infinity();
 
   for (std::size_t index = 0; index < ranges.size(); ++index) {
-    const float angle = angle_min + static_cast<float>(index) * angle_increment;
+    const float angle =
+      angle_min +
+      static_cast<float>(index) * angle_increment;
+
     const float range = ranges[index];
 
-    const bool inside_sector = std::abs(angle) <= half_field_of_view_rad;
-    const bool valid_range = std::isfinite(range) && range >= range_min && range <= range_max;
+    const bool inside_sector =
+      std::abs(angle) <= half_field_of_view_rad;
+
+    const bool valid_range =
+      std::isfinite(range) &&
+      range >= range_min &&
+      range <= range_max;
+
     if (inside_sector && valid_range) {
       minimum = std::min(minimum, range);
     }
   }
 
   return minimum;
+}
+
+inline double calculate_dynamic_stop_distance(
+  const double base_stop_distance,
+  const double commanded_forward_speed,
+  const double reaction_time,
+  const double braking_deceleration,
+  const double maximum_stop_distance)
+{
+  const double forward_speed =
+    std::max(0.0, commanded_forward_speed);
+
+  const double reaction_distance =
+    forward_speed * reaction_time;
+
+  const double braking_distance =
+    (forward_speed * forward_speed) /
+    (2.0 * braking_deceleration);
+
+  const double calculated_distance =
+    base_stop_distance +
+    reaction_distance +
+    braking_distance;
+
+  return std::min(
+    calculated_distance,
+    maximum_stop_distance);
 }
 
 }  // namespace robot_safety_monitor

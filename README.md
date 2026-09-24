@@ -4,23 +4,25 @@ An interview-ready ROS 2 safety system that prevents a mobile robot from driving
 into obstacles or operating without fresh lidar data.
 
 A C++ safety monitor evaluates forward lidar ranges, monitors sensor health, and
-publishes a latched safety-stop state. A Python velocity guard sits between Nav2
-or teleoperation and the robot base, forwarding safe commands while replacing
-unsafe commands with zero velocity.
+calculates a velocity-dependent stopping distance from the commanded forward
+speed. A Python velocity guard sits between Nav2 or teleoperation and the robot
+base, forwarding safe commands while replacing unsafe commands with zero
+velocity.
 
-The project includes unit tests for lidar-processing logic and an automated ROS 2
-integration test that verifies startup protection, lidar-timeout detection, reset
-validation, and safe fault recovery.
+The project includes C++ unit tests for lidar processing and dynamic stopping
+logic, plus an automated ROS 2 launch test that verifies startup protection,
+lidar-timeout detection, reset validation, and safe fault recovery.
 
 ## What this project showcases
 
 - ROS 2 Jazzy nodes, topics, services, parameters, launch files, timers, and QoS
 - C++ and Python nodes working together in one safety system
 - Object-oriented design and separation of sensing, decisions, and actuation
-- `sensor_msgs/msg/LaserScan`, `geometry_msgs/msg/Twist`, and
-  `std_srvs/srv/Trigger`
+- `sensor_msgs/msg/LaserScan`, `geometry_msgs/msg/Twist`,
+  `std_msgs/msg/Bool`, `std_msgs/msg/Float32`, and `std_srvs/srv/Trigger`
 - Forward-sector lidar processing and invalid-range filtering
-- Configurable stopping and release distances with hysteresis
+- Velocity-dependent stopping distance using reaction and braking distance
+- Dynamic release distance with hysteresis
 - Latched emergency-stop behavior and operator-controlled reset
 - Fail-safe startup and stale-lidar watchdog protection
 - C++ unit testing and automated ROS 2 launch integration testing
@@ -36,16 +38,18 @@ adding Nav2, SLAM, localization, and autonomous behaviors.
 ```mermaid
 flowchart LR
     L["Lidar /scan"] --> M["C++ safety monitor"]
-    M -->|"/safety/stop"| G["Python velocity guard"]
-    M -->|"/safety/min_clearance"| D["Monitoring"]
+    N["Nav2 or teleop /cmd_vel_raw"] --> M
+    N --> G["Python velocity guard"]
     W["Lidar watchdog"] --> M
-    N["Nav2 or teleop /cmd_vel_raw"] --> G
+    M -->|"Stop state"| G
+    M --> D["Safety monitoring topics"]
     G -->|"/cmd_vel"| R["Robot base"]
-    U["Operator /safety/reset"] --> M
+    U["Operator reset"] --> M
 ```
 
-The safety layer prevents Nav2 or teleoperation from publishing directly to the
-robot base:
+The safety monitor uses both current lidar clearance and commanded forward
+velocity. The velocity guard uses the resulting latched stop state to control
+whether motion commands reach the robot.
 
 ```text
 Without safety layer:
@@ -53,6 +57,7 @@ Nav2 or teleop → /cmd_vel → robot
 
 With safety layer:
 Nav2 or teleop → /cmd_vel_raw → velocity guard → /cmd_vel → robot
+                              ↘ safety monitor
 ```
 
 ## ROS 2 interfaces
@@ -60,10 +65,11 @@ Nav2 or teleop → /cmd_vel_raw → velocity guard → /cmd_vel → robot
 | Interface | Type | Purpose |
 | --- | --- | --- |
 | `/scan` | `sensor_msgs/msg/LaserScan` | Supplies lidar range measurements |
+| `/cmd_vel_raw` | `geometry_msgs/msg/Twist` | Supplies the requested velocity to the monitor and guard |
 | `/safety/stop` | `std_msgs/msg/Bool` | Publishes the latched safety state |
 | `/safety/min_clearance` | `std_msgs/msg/Float32` | Publishes the closest valid forward obstacle |
+| `/safety/active_stop_distance` | `std_msgs/msg/Float32` | Publishes the stopping threshold calculated for the current velocity |
 | `/safety/reset` | `std_srvs/srv/Trigger` | Clears the latch only when reset conditions are safe |
-| `/cmd_vel_raw` | `geometry_msgs/msg/Twist` | Receives desired commands from teleoperation or Nav2 |
 | `/cmd_vel` | `geometry_msgs/msg/Twist` | Sends filtered commands to the robot base |
 
 ## Safety configuration
@@ -77,26 +83,86 @@ safety_monitor:
     release_distance: 0.60
     field_of_view_degrees: 60.0
     scan_timeout: 0.50
+
+    reaction_time: 0.25
+    braking_deceleration: 0.80
+    max_stop_distance: 1.50
 ```
 
 | Parameter | Value | Purpose |
 | --- | ---: | --- |
-| `stop_distance` | 0.45 m | Latches the stop when an obstacle reaches this distance |
-| `release_distance` | 0.60 m | Minimum clearance required before reset |
+| `stop_distance` | 0.45 m | Minimum stopping threshold used at zero forward speed |
+| `release_distance` | 0.60 m | Base reset threshold and source of the hysteresis margin |
 | `field_of_view_degrees` | 60° | Monitored forward lidar sector |
 | `scan_timeout` | 0.50 s | Maximum permitted age of the latest lidar scan |
+| `reaction_time` | 0.25 s | Estimated delay before braking begins |
+| `braking_deceleration` | 0.80 m/s² | Assumed available braking deceleration |
+| `max_stop_distance` | 1.50 m | Maximum permitted dynamic stopping threshold |
 
-Keeping these values in YAML allows the safety behavior to be changed for
+Keeping these values in YAML allows the safety behavior to be adjusted for
 different robots and sensors without recompiling the C++ node.
+
+## Velocity-dependent stopping distance
+
+A fixed threshold does not account for the fact that a faster robot needs more
+distance to react and brake. The monitor therefore calculates:
+
+```text
+active stop distance = base distance
+                     + forward speed × reaction time
+                     + forward speed² / (2 × deceleration)
+```
+
+In mathematical form:
+
+\[
+d_{active} = \min\left(
+  d_{max},
+  d_{base} + vt_r + \frac{v^2}{2a}
+\right)
+\]
+
+where:
+
+- `d_base` is `stop_distance`
+- `v` is the non-negative commanded forward velocity
+- `t_r` is `reaction_time`
+- `a` is `braking_deceleration`
+- `d_max` is `max_stop_distance`
+
+Reverse velocity is treated as zero by this forward-sector calculation. Reverse
+protection is intentionally listed as a future extension.
+
+With the default parameters:
+
+| Forward velocity | Reaction distance | Braking distance | Active stop distance |
+| ---: | ---: | ---: | ---: |
+| 0.0 m/s | 0.00000 m | 0.00000 m | 0.45000 m |
+| 0.5 m/s | 0.12500 m | 0.15625 m | 0.73125 m |
+| 1.0 m/s | 0.25000 m | 0.62500 m | 1.32500 m |
+| 2.0 m/s | 0.50000 m | 2.50000 m | 1.50000 m, capped |
+
+The dynamic release distance preserves the configured hysteresis margin:
+
+```text
+hysteresis margin = release_distance - stop_distance
+                  = 0.60 - 0.45
+                  = 0.15 m
+
+active release distance = active stop distance + 0.15 m
+```
+
+At `0.5 m/s`, the active stop distance is `0.73125 m`, so reset requires at
+least `0.88125 m` of valid forward clearance.
 
 ## Why each design choice is used
 
-- **C++ for lidar processing:** lidar callbacks can arrive frequently, and C++
-  provides efficient robot-side processing while demonstrating production-style
-  ROS 2 development.
+- **C++ for lidar and stopping calculations:** lidar callbacks can arrive
+  frequently, and C++ provides efficient robot-side processing while
+  demonstrating production-style ROS 2 development.
 
-- **Python for command guarding:** the velocity-gating policy is concise and easy
-  to inspect, extend, and test. It also demonstrates multi-language ROS 2
+- **Python for command guarding:** the velocity-gating policy is concise and
+  easy to inspect, extend, and test. It also demonstrates multi-language ROS 2
   integration.
 
 - **Forward field of view:** the robot monitors the region relevant to forward
@@ -105,33 +171,39 @@ different robots and sensors without recompiling the C++ node.
 - **Invalid-range filtering:** `NaN`, infinite, below-minimum, and above-maximum
   lidar values are ignored when calculating clearance.
 
-- **Latched stop:** one clear scan cannot automatically restart the robot after an
-  unsafe event. An operator must explicitly request a reset.
+- **Velocity-dependent threshold:** faster forward motion increases reaction
+  and braking distance, so the safety zone expands before the robot reaches an
+  obstacle.
 
-- **Different stop and release distances:** the robot stops at 0.45 m but cannot
-  reset until clearance reaches 0.60 m. This hysteresis prevents rapid switching
-  caused by noisy readings near one threshold.
+- **Maximum threshold:** `max_stop_distance` prevents an invalid or extreme
+  command from creating an unbounded threshold.
+
+- **Dynamic release hysteresis:** the same 0.15 m gap between stopping and
+  releasing is preserved as velocity changes, preventing unstable switching.
+
+- **Latched stop:** one clear scan cannot automatically restart the robot after
+  an unsafe event. An operator must explicitly request a reset.
 
 - **Fail-safe startup:** the system starts with the safety stop latched. Movement
   is not permitted until valid lidar data arrives, the path is clear, and reset
   is requested.
 
-- **Lidar watchdog:** a timer checks the age of the latest `/scan` message. If the
-  data becomes stale, the system assumes that environmental information is
+- **Lidar watchdog:** a timer checks the age of the latest `/scan` message. If
+  data becomes stale, the system assumes environmental information is
   unavailable and latches the safety stop.
 
-- **Validated reset service:** reset is rejected if lidar data is missing, stale,
-  invalid, or if an obstacle remains inside the release distance.
+- **Validated reset service:** reset is rejected if lidar data is missing,
+  stale, invalid, or an obstacle remains inside the active release distance.
 
-- **Transient-local QoS:** a velocity guard that starts after the safety monitor
-  immediately receives the most recent stop state instead of temporarily
-  assuming the robot is safe.
+- **Transient-local QoS:** a late-starting velocity guard immediately receives
+  the most recent stop state. The active stopping-distance publisher also keeps
+  its latest value available for monitoring tools.
 
-- **Pure C++ safety logic:** lidar-range evaluation is separated from the ROS API,
-  allowing the calculation to be tested independently.
+- **Pure C++ safety logic:** lidar evaluation and stopping-distance calculation
+  are separated from ROS APIs, allowing both calculations to be unit-tested.
 
 - **Automated integration testing:** the real safety node is launched and tested
-  through its ROS topics and service, providing repeatable regression coverage.
+  through ROS topics and a service, providing repeatable regression coverage.
 
 ## Repository layout
 
@@ -194,15 +266,11 @@ source ~/robotics_ws/install/setup.bash
 ros2 launch robot_safety_monitor safety_system.launch.py
 ```
 
-The launch file starts:
+The launch file starts `safety_monitor_node` and `velocity_guard` and loads
+`config/safety.yaml`.
 
-- `safety_monitor_node`
-- `velocity_guard`
-
-It also loads the parameters from `config/safety.yaml`.
-
-The system begins with the safety stop latched because no validated lidar data
-has arrived yet.
+The system begins with the stop latched because no validated lidar data has
+arrived yet.
 
 ### 3. Start the synthetic lidar publisher
 
@@ -216,10 +284,7 @@ ros2 run robot_safety_monitor demo_scan_publisher
 ```
 
 The synthetic publisher produces repeatable `LaserScan` messages without
-requiring Gazebo or physical hardware.
-
-The default simulated obstacle is at 2.0 m, so the path is clear. However, the
-system remains stopped until an explicit reset is accepted.
+requiring Gazebo or physical hardware. Its default obstacle is at 2.0 m.
 
 Reset the startup latch:
 
@@ -248,29 +313,13 @@ data: false
 
 ### 4. Simulate an obstacle
 
-Move the simulated obstacle inside the 0.45 m stopping distance:
+Move the obstacle inside the stopping distance:
 
 ```bash
 ros2 param set /demo_scan_publisher obstacle_distance 0.30
 ```
 
-The safety monitor should latch the stop:
-
-```text
-SAFETY STOP: Obstacle entered the stopping zone.
-```
-
-Verify it:
-
-```bash
-ros2 topic echo /safety/stop --once
-```
-
-Expected:
-
-```text
-data: true
-```
+The monitor should latch the stop and `/safety/stop` should become `true`.
 
 A reset request must fail while the obstacle remains too close:
 
@@ -287,15 +336,9 @@ message: Reset rejected: obstacle remains inside the release distance.
 
 ### 5. Clear the obstacle and reset
 
-Move the obstacle beyond the 0.60 m release distance:
-
 ```bash
 ros2 param set /demo_scan_publisher obstacle_distance 2.0
-```
 
-Reset the stop:
-
-```bash
 ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
 ```
 
@@ -308,8 +351,7 @@ message: Safety stop cleared.
 
 ### 6. Connect a robot command source
 
-For TurtleBot3 teleoperation, remap the normal velocity output to the guarded
-input:
+For TurtleBot3 teleoperation, remap its normal output to the guarded input:
 
 ```bash
 ros2 run turtlebot3_teleop teleop_keyboard \
@@ -317,25 +359,19 @@ ros2 run turtlebot3_teleop teleop_keyboard \
   -r /cmd_vel:=/cmd_vel_raw
 ```
 
-The velocity guard becomes the only node permitted to publish the final
-`/cmd_vel` command.
-
-When the system is safe:
+The velocity guard becomes the only node allowed to publish final `/cmd_vel`
+commands.
 
 ```text
-/cmd_vel_raw → forwarded to /cmd_vel
-```
-
-When the stop is latched:
-
-```text
-/cmd_vel_raw → replaced with a zero Twist → /cmd_vel
+Safe:    /cmd_vel_raw → forwarded command → /cmd_vel
+Stopped: /cmd_vel_raw → zero Twist         → /cmd_vel
 ```
 
 ### 7. Inspect the ROS system
 
 ```bash
 ros2 topic echo /safety/min_clearance
+ros2 topic echo /safety/active_stop_distance
 ros2 topic echo /safety/stop
 ros2 node info /safety_monitor
 ros2 topic hz /scan
@@ -357,19 +393,34 @@ colcon test --packages-select robot_safety_monitor
 colcon test-result --verbose
 ```
 
-The C++ unit tests validate lidar-processing logic without requiring a running
-ROS graph.
+The C++ tests validate safety calculations without requiring a running ROS
+graph.
 
-They cover:
+### Lidar-processing tests
 
-- Clear forward space
-- A frontal obstacle
-- Invalid `NaN` and infinite measurements
-- Measurements below and above the sensor limits
-- Obstacles outside the configured forward field of view
+The four `SafetyLogic` tests verify that the calculation:
 
-This verifies the safety calculation independently from topics, services, and
-node timing.
+- Finds the closest frontal obstacle
+- Ignores obstacles outside the configured field of view
+- Ignores invalid lidar ranges
+- Returns infinity when no valid reading exists
+
+### Dynamic-distance tests
+
+The five `DynamicStopDistance` tests verify that the calculation:
+
+- Returns the base distance at zero speed
+- Treats reverse speed as zero for the forward sector
+- Includes reaction and braking distance
+- Increases as forward speed increases
+- Respects the configured maximum distance
+
+Validated result:
+
+```text
+Running 9 tests from 2 test suites.
+[  PASSED  ] 9 tests.
+```
 
 ## Part 3 — Lidar watchdog and fail-safe recovery
 
@@ -390,23 +441,20 @@ Possible failures include:
 
 ### Solution
 
-Every `/scan` callback records the arrival time of the latest lidar message:
+Every `/scan` callback records the latest arrival time:
 
 ```cpp
 last_scan_time_ = now();
 ```
 
-A watchdog timer executes every 100 milliseconds and compares the current time
-with the latest scan time.
-
-The decision is:
+A watchdog timer executes every 100 milliseconds and checks the scan age:
 
 ```text
-Scan age <= 0.50 seconds → lidar is fresh
-Scan age > 0.50 seconds  → latch the safety stop
+Scan age <= scan_timeout → lidar is fresh
+Scan age > scan_timeout  → latch the safety stop
 ```
 
-If the lidar becomes stale, the monitor reports:
+If lidar becomes stale, the monitor reports:
 
 ```text
 SAFETY STOP: Lidar data timed out.
@@ -419,16 +467,15 @@ The `/safety/reset` service accepts a reset only when:
 - At least one lidar message has been received
 - The latest scan is fresh
 - The scan contains valid ranges
-- The closest forward obstacle is at least 0.60 m away
+- The closest obstacle is outside the active release distance
 
 A clear scan does not automatically restart the robot. An explicit reset remains
 required after every unsafe event.
 
 ### Manual watchdog test
 
-Stop only the synthetic lidar publisher using `Ctrl+C`.
-
-After the configured timeout, verify:
+Stop only the synthetic lidar publisher using `Ctrl+C`. After the configured
+timeout, verify:
 
 ```bash
 ros2 topic echo /safety/stop --once
@@ -440,7 +487,7 @@ Expected:
 data: true
 ```
 
-Attempt a reset while the lidar is unavailable:
+Attempt a reset while lidar is unavailable:
 
 ```bash
 ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
@@ -453,19 +500,9 @@ success: false
 message: Reset rejected: lidar data is missing or stale.
 ```
 
-Restart the lidar publisher:
+Restart the lidar publisher and reset after fresh clear scans arrive.
 
-```bash
-ros2 run robot_safety_monitor demo_scan_publisher
-```
-
-After fresh clear scans arrive, reset the system:
-
-```bash
-ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
-```
-
-### Manual validation results
+### Manual watchdog results
 
 | Test condition | Expected behavior | Result |
 | --- | --- | --- |
@@ -479,12 +516,10 @@ ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
 
 ## Part 4 — Automated watchdog integration testing
 
-The package includes an automated ROS 2 launch test that starts the real
-`safety_monitor_node` and verifies the watchdog through its ROS topics and
-service.
+The package includes a ROS 2 launch test that starts the real
+`safety_monitor_node` and verifies its watchdog through topics and a service.
 
-Unlike the C++ unit test, this integration test validates the complete running
-system, including:
+The test validates:
 
 - Node startup
 - Test-specific parameters
@@ -494,31 +529,20 @@ system, including:
 - Watchdog-timer behavior
 - Process shutdown
 
-### Automated test sequence
+### Automated sequence
 
-The integration test automatically:
+1. Start the monitor with a 0.30-second test timeout.
+2. Confirm that startup begins with the stop latched.
+3. Publish clear lidar scans with 2.0 m clearance.
+4. Call `/safety/reset`.
+5. Confirm that reset succeeds and `/safety/stop` becomes `false`.
+6. Stop publishing scans to simulate lidar failure.
+7. Wait for the watchdog timeout.
+8. Confirm that `/safety/stop` returns to `true`.
+9. Attempt another reset with stale data.
+10. Confirm that the unsafe reset is rejected.
 
-1. Starts the safety monitor with a 0.30-second test timeout.
-2. Confirms that the system starts with the stop latched.
-3. Publishes clear lidar scans with 2.0 m of clearance.
-4. Calls `/safety/reset`.
-5. Confirms that the reset succeeds.
-6. Confirms that `/safety/stop` changes to `false`.
-7. Stops publishing scans to simulate lidar failure.
-8. Waits for the watchdog timeout.
-9. Confirms that `/safety/stop` returns to `true`.
-10. Attempts another reset with stale lidar data.
-11. Confirms that the unsafe reset is rejected.
-
-### Interfaces tested
-
-| Interface | Type | Test purpose |
-| --- | --- | --- |
-| `/scan` | `sensor_msgs/msg/LaserScan` | Supplies simulated clear lidar data |
-| `/safety/stop` | `std_msgs/msg/Bool` | Verifies startup, clear, and timeout states |
-| `/safety/reset` | `std_srvs/srv/Trigger` | Verifies accepted and rejected resets |
-
-### Run only the watchdog integration test
+### Run only the watchdog test
 
 ```bash
 cd ~/robotics_ws
@@ -540,31 +564,191 @@ Validated result:
 Summary: 2 tests, 0 errors, 0 failures, 0 skipped
 ```
 
-The launch output confirms the complete transition:
+The optional post-shutdown phase reports zero tests because the project does not
+define post-shutdown assertions. This is expected and is not a failure.
 
-```text
-Safety stop reset by service request.
-SAFETY STOP: Lidar data timed out.
-Ran 1 test
-OK
+## Part 5 — Velocity-dependent stopping validation
+
+### Confirm the active-distance topic
+
+```bash
+ros2 topic info /safety/active_stop_distance -v
 ```
 
-The optional post-shutdown testing phase reports zero tests because this project
-does not currently define post-shutdown assertions. This is expected and does
-not represent a failure.
+Expected type:
 
-### Engineering contribution
+```text
+std_msgs/msg/Float32
+```
 
-This milestone demonstrates:
+### Test zero velocity
 
-- Automated ROS 2 launch testing
-- Fault injection through simulated sensor failure
-- Asynchronous topic and service validation
-- QoS compatibility testing
-- Watchdog timing verification
-- Fail-safe startup verification
-- Safe fault-recovery validation
-- Repeatable regression testing
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 0.0}, angular: {z: 0.0}}"
+
+ros2 topic echo /safety/active_stop_distance --once
+```
+
+Validated result:
+
+```text
+data: 0.45
+```
+
+### Test moderate forward velocity
+
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 0.5}, angular: {z: 0.0}}"
+
+ros2 topic echo /safety/active_stop_distance --once
+```
+
+Validated result:
+
+```text
+data: 0.73125
+```
+
+A minor representation difference such as `0.731249988` is normal for a
+`Float32` message.
+
+### Test the maximum-distance cap
+
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 3.0}, angular: {z: 0.0}}"
+
+ros2 topic echo /safety/active_stop_distance --once
+```
+
+Validated result:
+
+```text
+data: 1.5
+```
+
+### Validate the dynamic stop decision
+
+First establish a safe stationary condition:
+
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 0.0}, angular: {z: 0.0}}"
+
+ros2 param set /demo_scan_publisher obstacle_distance 2.0
+
+ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
+```
+
+Move the obstacle to `0.60 m`. At zero velocity, the active threshold remains
+`0.45 m`, so the stop stays clear:
+
+```text
+minimum clearance:     0.60 m
+active stop distance:  0.45 m
+safety stop:           false
+```
+
+Without moving the obstacle, command `0.5 m/s`:
+
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 0.5}, angular: {z: 0.0}}"
+```
+
+The active threshold increases to `0.73125 m`. Because `0.60 m` is now inside
+the active threshold, the monitor latches the stop:
+
+```text
+SAFETY STOP: Obstacle entered the dynamic stopping zone.
+```
+
+Validated state:
+
+```text
+data: true
+```
+
+### Validate dynamic reset rejection
+
+At `0.5 m/s`, the active release distance is `0.88125 m`. A reset with the
+obstacle at `0.60 m` is therefore rejected:
+
+```bash
+ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
+```
+
+Validated result:
+
+```text
+success: false
+message: Reset rejected: obstacle remains inside the release distance.
+```
+
+### Validate safe recovery
+
+Return velocity to zero, move the obstacle to 2.0 m, and reset:
+
+```bash
+ros2 topic pub --once /cmd_vel_raw geometry_msgs/msg/Twist \
+"{linear: {x: 0.0}, angular: {z: 0.0}}"
+
+ros2 param set /demo_scan_publisher obstacle_distance 2.0
+
+ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
+```
+
+Validated result:
+
+```text
+success: true
+message: Safety stop cleared.
+active stop distance: 0.45 m
+safety stop: false
+```
+
+### Dynamic-stopping results
+
+| Test condition | Expected behavior | Result |
+| --- | --- | --- |
+| Velocity 0.0 m/s | Active distance is 0.45 m | Passed |
+| Velocity 0.5 m/s | Active distance is 0.73125 m | Passed |
+| Velocity 3.0 m/s | Active distance is capped at 1.50 m | Passed |
+| Obstacle 0.60 m at zero speed | Stop remains clear | Passed |
+| Same obstacle at 0.5 m/s | Dynamic stop latches | Passed |
+| Reset while obstacle is inside dynamic release distance | Reset rejected | Passed |
+| Velocity zero and obstacle returned to 2.0 m | Reset succeeds | Passed |
+
+## Complete automated-test result
+
+The complete package suite includes C++ unit tests, the launch integration test,
+and ROS lint checks.
+
+Validated output:
+
+```text
+100% tests passed, 0 tests failed out of 10
+Summary: 45 tests, 0 errors, 0 failures, 3 skipped
+```
+
+The checks include:
+
+- `test_safety_logic`
+- `test_test_watchdog_launch.py`
+- `copyright`
+- `cppcheck`
+- `cpplint`
+- `flake8`
+- `lint_cmake`
+- `pep257`
+- `uncrustify`
+- `xmllint`
+
+The cppcheck wrapper may report that cppcheck 2.13 is skipped because of known
+performance issues. The ROS test wrapper treats this as an intentional skip, not
+a test failure.
 
 ## Demo experiment and measurable results
 
@@ -575,6 +759,7 @@ ros2 bag record \
   /scan \
   /safety/stop \
   /safety/min_clearance \
+  /safety/active_stop_distance \
   /cmd_vel_raw \
   /cmd_vel
 ```
@@ -583,11 +768,11 @@ Future measured results will include:
 
 | Metric | Measurement method | Target |
 | --- | --- | --- |
-| Stop-threshold error | Actual minimum clearance minus configured threshold | Within one lidar range bin |
-| Stop-reaction latency | Unsafe scan timestamp to first zero `/cmd_vel` | Below 100 ms in simulation |
+| Stop-threshold error | Actual clearance minus active threshold | Within one lidar range bin |
+| Stop-reaction latency | Unsafe scan or velocity command to first zero `/cmd_vel` | Below 100 ms in simulation |
 | Watchdog latency | Last scan timestamp to latched stop | Timeout plus one timer period |
 | False stops | Stops during five clear-path runs | 0 |
-| Unsafe resets | Accepted resets while an obstacle or stale lidar remains | 0 |
+| Unsafe resets | Accepted resets while obstacle or stale lidar remains | 0 |
 
 ## Completed milestones
 
@@ -601,12 +786,18 @@ Future measured results will include:
 - [x] Add fail-safe startup behavior
 - [x] Add lidar-timeout watchdog protection
 - [x] Manually validate obstacle and lidar-failure behavior
-- [x] Add C++ unit tests
 - [x] Add automated ROS 2 watchdog integration testing
+- [x] Add velocity-dependent stopping-distance calculation
+- [x] Subscribe to `/cmd_vel_raw` in the safety monitor
+- [x] Publish `/safety/active_stop_distance`
+- [x] Add dynamic release-distance validation
+- [x] Add five dynamic stopping-distance unit tests
+- [x] Validate dynamic stopping and safe recovery at runtime
+- [x] Pass the complete build, test, and lint suite
 
 ## Next implementation parts
 
-1. Add reverse-direction protection and velocity-dependent stopping distance.
+1. Add reverse-direction protection with a rear lidar sector.
 2. Publish diagnostic status and an RViz safety-sector marker.
 3. Add a rosbag analysis script and measure safety-response latency.
 4. Add GitHub Actions for automatic build and test execution.
