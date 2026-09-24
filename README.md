@@ -1,6 +1,6 @@
 # Project 1: ROS 2 Robot Safety Monitor
 
-An interview-ready ROS 2 safety system that prevents a mobile robot from driving
+ROS 2 safety system that prevents a mobile robot from driving
 into obstacles or operating without fresh lidar data.
 
 A C++ safety monitor evaluates forward lidar ranges, monitors sensor health, and
