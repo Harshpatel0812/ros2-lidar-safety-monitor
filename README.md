@@ -1,17 +1,19 @@
 # Project 1: ROS 2 Robot Safety Monitor
 
-ROS 2 safety system that prevents a mobile robot from driving
-into obstacles or operating without fresh lidar data.
+A fail-safe ROS 2 safety layer that prevents a mobile robot from driving into
+obstacles, operating without fresh lidar data, or continuing to move after its
+velocity-command source stops publishing.
 
-A C++ safety monitor evaluates forward lidar ranges, monitors sensor health, and
-calculates a velocity-dependent stopping distance from the commanded forward
-speed. A Python velocity guard sits between Nav2 or teleoperation and the robot
-base, forwarding safe commands while replacing unsafe commands with zero
-velocity.
+A C++ safety monitor evaluates forward lidar ranges, monitors sensor health,
+and calculates a velocity-dependent stopping distance from the commanded
+forward speed. A Python velocity guard sits between Nav2 or teleoperation and
+the robot base, forwarding safe commands while replacing unsafe or stale
+commands with zero velocity.
 
-The project includes C++ unit tests for lidar processing and dynamic stopping
-logic, plus an automated ROS 2 launch test that verifies startup protection,
-lidar-timeout detection, reset validation, and safe fault recovery.
+The project includes C++ unit tests for lidar processing and dynamic stopping,
+plus ROS 2 launch integration tests for lidar-watchdog behavior and
+velocity-command timeout protection. RViz markers display the active stopping
+zone, minimum clearance, lidar health, and latched safety state.
 
 ## What this project showcases
 
@@ -19,19 +21,24 @@ lidar-timeout detection, reset validation, and safe fault recovery.
 - C++ and Python nodes working together in one safety system
 - Object-oriented design and separation of sensing, decisions, and actuation
 - `sensor_msgs/msg/LaserScan`, `geometry_msgs/msg/Twist`,
-  `std_msgs/msg/Bool`, `std_msgs/msg/Float32`, and `std_srvs/srv/Trigger`
-- Forward-sector lidar processing and invalid-range filtering
+  `std_msgs/msg/Bool`, `std_msgs/msg/Float32`,
+  `std_srvs/srv/Trigger`, and `visualization_msgs/msg/MarkerArray`
+- Forward-sector lidar processing with conservative invalid-range handling
 - Velocity-dependent stopping distance using reaction and braking distance
 - Dynamic release distance with hysteresis
 - Latched emergency-stop behavior and operator-controlled reset
 - Fail-safe startup and stale-lidar watchdog protection
+- Velocity-command freshness monitoring and automatic zero-velocity output
+- Dynamic RViz safety-zone and diagnostic-status visualization
 - C++ unit testing and automated ROS 2 launch integration testing
 - CMake, colcon, YAML, Git, Bash, Linux, and Docker
-- Repeatable sensor-failure injection and regression testing
+- Repeatable sensor and command failure injection
+- Regression testing of safety-critical behavior
 
 This project is intentionally smaller than a complete navigation system. Its
-purpose is to demonstrate safe ROS 2 communication and robot integration before
-adding Nav2, SLAM, localization, and autonomous behaviors.
+purpose is to demonstrate safe ROS 2 communication, fault handling, testing,
+and robot integration before adding Nav2, SLAM, localization, and autonomous
+mission behaviors.
 
 ## Architecture
 
@@ -40,16 +47,19 @@ flowchart LR
     L["Lidar /scan"] --> M["C++ safety monitor"]
     N["Nav2 or teleop /cmd_vel_raw"] --> M
     N --> G["Python velocity guard"]
-    W["Lidar watchdog"] --> M
-    M -->|"Stop state"| G
-    M --> D["Safety monitoring topics"]
+    LW["Lidar watchdog"] --> M
+    CW["Command watchdog"] --> G
+    M -->|"Latched stop"| G
+    M --> V["Safety topics and RViz markers"]
     G -->|"/cmd_vel"| R["Robot base"]
     U["Operator reset"] --> M
+
 ```
 
-The safety monitor uses both current lidar clearance and commanded forward
-velocity. The velocity guard uses the resulting latched stop state to control
-whether motion commands reach the robot.
+The safety monitor uses current lidar clearance and commanded forward velocity
+to decide whether motion is safe. The velocity guard uses the resulting
+latched-stop state and command freshness to control whether a requested command
+reaches the robot.
 
 ```text
 Without safety layer:
@@ -57,7 +67,10 @@ Nav2 or teleop → /cmd_vel → robot
 
 With safety layer:
 Nav2 or teleop → /cmd_vel_raw → velocity guard → /cmd_vel → robot
-                              ↘ safety monitor
+                       │              ↑
+                       └→ safety monitor
+                            │
+                            └→ safety state and RViz markers
 ```
 
 ## ROS 2 interfaces
@@ -65,12 +78,14 @@ Nav2 or teleop → /cmd_vel_raw → velocity guard → /cmd_vel → robot
 | Interface | Type | Purpose |
 | --- | --- | --- |
 | `/scan` | `sensor_msgs/msg/LaserScan` | Supplies lidar range measurements |
-| `/cmd_vel_raw` | `geometry_msgs/msg/Twist` | Supplies the requested velocity to the monitor and guard |
-| `/safety/stop` | `std_msgs/msg/Bool` | Publishes the latched safety state |
-| `/safety/min_clearance` | `std_msgs/msg/Float32` | Publishes the closest valid forward obstacle |
+| `/cmd_vel_raw` | `geometry_msgs/msg/Twist` | Supplies requested velocity to the monitor and guard |
+| `/safety/stop` | `std_msgs/msg/Bool` | Publishes the latched safety-stop state |
+| `/safety/min_clearance` | `std_msgs/msg/Float32` | Publishes the closest usable forward lidar return |
 | `/safety/active_stop_distance` | `std_msgs/msg/Float32` | Publishes the stopping threshold calculated for the current velocity |
+| `/safety/cmd_vel_fresh` | `std_msgs/msg/Bool` | Reports whether the raw velocity command is recent |
+| `/safety/markers` | `visualization_msgs/msg/MarkerArray` | Publishes the dynamic RViz safety zone and status text |
 | `/safety/reset` | `std_srvs/srv/Trigger` | Clears the latch only when reset conditions are safe |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | Sends filtered commands to the robot base |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | Sends guarded velocity commands to the robot base |
 
 ## Safety configuration
 
@@ -87,20 +102,25 @@ safety_monitor:
     reaction_time: 0.25
     braking_deceleration: 0.80
     max_stop_distance: 1.50
+
+velocity_guard:
+  ros__parameters:
+    cmd_vel_timeout: 0.50
 ```
 
-| Parameter | Value | Purpose |
-| --- | ---: | --- |
-| `stop_distance` | 0.45 m | Minimum stopping threshold used at zero forward speed |
-| `release_distance` | 0.60 m | Base reset threshold and source of the hysteresis margin |
-| `field_of_view_degrees` | 60° | Monitored forward lidar sector |
-| `scan_timeout` | 0.50 s | Maximum permitted age of the latest lidar scan |
-| `reaction_time` | 0.25 s | Estimated delay before braking begins |
-| `braking_deceleration` | 0.80 m/s² | Assumed available braking deceleration |
-| `max_stop_distance` | 1.50 m | Maximum permitted dynamic stopping threshold |
+| Parameter | Node | Value | Purpose |
+| --- | --- | ---: | --- |
+| `stop_distance` | Safety Monitor | 0.45 m | Minimum stopping threshold at zero forward speed |
+| `release_distance` | Safety Monitor | 0.60 m | Base reset threshold and source of the hysteresis margin |
+| `field_of_view_degrees` | Safety Monitor | 60° | Monitored forward lidar sector |
+| `scan_timeout` | Safety Monitor | 0.50 s | Maximum permitted age of the latest lidar scan |
+| `reaction_time` | Safety Monitor | 0.25 s | Estimated delay before braking begins |
+| `braking_deceleration` | Safety Monitor | 0.80 m/s² | Assumed available braking deceleration |
+| `max_stop_distance` | Safety Monitor | 1.50 m | Maximum permitted dynamic stopping threshold |
+| `cmd_vel_timeout` | Velocity Guard | 0.50 s | Maximum permitted age of the latest raw velocity command |
 
 Keeping these values in YAML allows the safety behavior to be adjusted for
-different robots and sensors without recompiling the C++ node.
+different robots and sensors without recompiling either node.
 
 ## Velocity-dependent stopping distance
 
@@ -168,8 +188,10 @@ least `0.88125 m` of valid forward clearance.
 - **Forward field of view:** the robot monitors the region relevant to forward
   motion instead of stopping for obstacles behind it. The angle is configurable.
 
-- **Invalid-range filtering:** `NaN`, infinite, below-minimum, and above-maximum
-  lidar values are ignored when calculating clearance.
+- **Conservative lidar-return handling:** `NaN`, infinite, zero, negative, and
+  above-maximum readings are ignored individually. A finite positive reading
+  below `range_min` is retained as a possible obstacle that is too close for
+  reliable measurement.
 
 - **Velocity-dependent threshold:** faster forward motion increases reaction
   and braking distance, so the safety zone expands before the robot reaches an
@@ -192,18 +214,36 @@ least `0.88125 m` of valid forward clearance.
   data becomes stale, the system assumes environmental information is
   unavailable and latches the safety stop.
 
+- **Command-velocity watchdog:** the guard checks the arrival time of
+  `/cmd_vel_raw`. If the command source stops publishing for longer than
+  `cmd_vel_timeout`, the guard marks the command stale and continuously
+  publishes zero velocity.
+
+- **Immediate stop enforcement:** receiving `/safety/stop = true` causes the
+  velocity guard to publish a zero `Twist` immediately instead of waiting for
+  another raw command.
+
 - **Validated reset service:** reset is rejected if lidar data is missing,
   stale, invalid, or an obstacle remains inside the active release distance.
 
-- **Transient-local QoS:** a late-starting velocity guard immediately receives
-  the most recent stop state. The active stopping-distance publisher also keeps
-  its latest value available for monitoring tools.
+- **Transient-local state QoS:** a late-starting velocity guard immediately
+  receives the most recent stop state. Monitoring tools can also obtain the
+  latest active stopping distance and visualization state.
+
+- **RViz MarkerArray visualization:** the stopping-zone radius is generated
+  from the real dynamic threshold. Green indicates a clear state, red indicates
+  a latched stop, and the text marker reports clearance, threshold, and stale
+  lidar status.
+
+- **Finite marker lifetime:** markers expire if the Safety Monitor stops
+  publishing, preventing RViz from displaying an outdated safe condition.
 
 - **Pure C++ safety logic:** lidar evaluation and stopping-distance calculation
   are separated from ROS APIs, allowing both calculations to be unit-tested.
 
-- **Automated integration testing:** the real safety node is launched and tested
-  through ROS topics and a service, providing repeatable regression coverage.
+- **Automated integration testing:** the real nodes are launched and exercised
+  through ROS topics and services, providing repeatable regression coverage
+  for both lidar and velocity-command watchdog behavior.
 
 ## Repository layout
 
@@ -224,6 +264,7 @@ robot_safety_monitor/
 │   └── safety_monitor.cpp
 ├── test/
 │   ├── test_safety_logic.cpp
+│   ├── test_velocity_guard_launch.py
 │   └── test_watchdog_launch.py
 ├── CMakeLists.txt
 ├── LICENSE
@@ -398,12 +439,13 @@ graph.
 
 ### Lidar-processing tests
 
-The four `SafetyLogic` tests verify that the calculation:
+The five `SafetyLogic` tests verify that the calculation:
 
 - Finds the closest frontal obstacle
 - Ignores obstacles outside the configured field of view
-- Ignores invalid lidar ranges
-- Returns infinity when no valid reading exists
+- Ignores `NaN`, infinity, zero, and negative readings
+- Treats a finite positive return below `range_min` as a hazard
+- Returns infinity when no usable reading exists
 
 ### Dynamic-distance tests
 
@@ -418,8 +460,8 @@ The five `DynamicStopDistance` tests verify that the calculation:
 Validated result:
 
 ```text
-Running 9 tests from 2 test suites.
-[  PASSED  ] 9 tests.
+Running 10 tests from 2 test suites.
+[  PASSED  ] 10 tests.
 ```
 
 ## Part 3 — Lidar watchdog and fail-safe recovery
@@ -721,22 +763,161 @@ safety stop: false
 | Reset while obstacle is inside dynamic release distance | Reset rejected | Passed |
 | Velocity zero and obstacle returned to 2.0 m | Reset succeeds | Passed |
 
+## Part 6 — Command-velocity watchdog
+
+The Velocity Guard does not allow the robot to continue using an old motion
+command after a planner, teleoperation node, or networked command source stops
+publishing. It records the arrival time of `/cmd_vel_raw` and compares its age
+with `cmd_vel_timeout`.
+
+The guard begins with:
+
+```text
+safety stop: true
+command fresh: false
+output velocity: zero
+```
+
+When the safety state is clear and a recent command exists, the requested
+`Twist` is forwarded. When the command becomes stale, the guard publishes:
+
+```text
+/safety/cmd_vel_fresh: false
+/cmd_vel: zero Twist
+```
+
+Receiving `/safety/stop = true` also produces an immediate zero command, even
+when the raw command is still fresh.
+
+The launch integration test validates this sequence:
+
+1. Startup command freshness is false.
+2. A fresh nonzero command is forwarded while safety is clear.
+3. `/safety/cmd_vel_fresh` becomes true.
+4. Freshness becomes false after `cmd_vel_timeout`.
+5. `/cmd_vel` receives a zero `Twist` after timeout.
+6. A new command restores freshness and forwarding.
+7. A safety stop immediately overrides a fresh command with zero velocity.
+
+Run only this integration test with:
+
+```bash
+cd ~/robotics_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
+colcon test \
+  --packages-select robot_safety_monitor \
+  --event-handlers console_direct+ \
+  --ctest-args -R test_velocity_guard_launch --output-on-failure
+```
+
+## Part 7 — RViz safety visualization
+
+The Safety Monitor publishes `/safety/markers` as a
+`visualization_msgs/msg/MarkerArray`. The visualization contains:
+
+- A forward `LINE_STRIP` showing the active stopping sector
+- A radius that grows with the velocity-dependent stopping distance
+- Green markers when the safety state is clear
+- Red markers when the stop is latched or lidar is stale
+- Status text containing `SAFE` or `STOP`
+- Active stopping distance and minimum clearance
+- A `LIDAR STALE` warning when scan data times out
+
+The marker uses the frame ID from the latest `LaserScan`. With the synthetic
+publisher, that frame is `demo_laser`. To view it under a `world` fixed frame,
+start a static transform:
+
+```bash
+ros2 run tf2_ros static_transform_publisher \
+  --x 0 --y 0 --z 0 \
+  --roll 0 --pitch 0 --yaw 0 \
+  --frame-id world \
+  --child-frame-id demo_laser
+```
+
+Start RViz:
+
+```bash
+rviz2
+```
+
+Configure RViz with:
+
+1. Fixed Frame: `world` or `demo_laser`
+2. `/scan`: `LaserScan` display with Best Effort reliability
+3. `/safety/markers`: `MarkerArray` display
+4. Top-down view centered on the sensor origin
+
+Validated visualization results:
+
+| Condition | Expected visualization | Result |
+| --- | --- | --- |
+| Zero forward speed | Stop distance displays 0.45 m | Passed |
+| Forward speed 0.5 m/s | Sector grows to approximately 0.73 m | Passed |
+| Clear obstacle at 2.0 m | Green `SAFE` after reset | Passed |
+| Obstacle at 0.30 m | Red `STOP` with 0.30 m clearance | Passed |
+| Lidar timeout | Red `STOP` with `LIDAR STALE` | Passed |
+| Successful safe reset | Marker changes from red to green | Passed |
+
+The marker lifetime is 0.30 seconds and the watchdog refreshes it every
+0.10 seconds. If the node stops publishing, RViz removes the stale marker.
+
+## Part 8 — Conservative below-minimum lidar policy
+
+Sensor drivers may report a finite positive distance below the declared
+`LaserScan.range_min`. Discarding that measurement could hide an object that is
+extremely close to the robot. The project therefore applies this policy:
+
+| Reading | Treatment |
+| --- | --- |
+| `NaN` or infinity | Ignore the individual reading |
+| Zero or negative | Ignore the individual reading |
+| Greater than `range_max` | Ignore the individual reading |
+| Finite, positive, below `range_min` | Retain as a possible close obstacle |
+| No usable readings | Return infinity; the ROS node latches a stop |
+
+Manual validation used:
+
+```bash
+ros2 run robot_safety_monitor demo_scan_publisher \
+  --ros-args -p obstacle_distance:=0.05
+```
+
+With `range_min = 0.10 m`, the system produced:
+
+```text
+minimum clearance: 0.05 m
+safety state: STOP
+reset while obstacle remains: rejected
+RViz marker: red
+```
+
+After changing the obstacle to `2.0 m`, the stop remained latched until the
+reset service succeeded. The final state was green `SAFE` with 2.0 m clearance.
+
+The synthetic scan background is 5.0 m. Therefore, setting
+`obstacle_distance` above `range_max` causes that sample to be ignored, while
+the remaining valid background readings produce a 5.0 m minimum clearance.
+
 ## Complete automated-test result
 
-The complete package suite includes C++ unit tests, the launch integration test,
-and ROS lint checks.
+The complete package suite includes C++ unit tests, two launch integration
+tests, and ROS lint checks.
 
 Validated output:
 
 ```text
-100% tests passed, 0 tests failed out of 10
-Summary: 45 tests, 0 errors, 0 failures, 3 skipped
+100% tests passed, 0 tests failed out of 11
+Summary: 50 tests, 0 errors, 0 failures, 3 skipped
 ```
 
 The checks include:
 
 - `test_safety_logic`
 - `test_test_watchdog_launch.py`
+- `test_test_velocity_guard_launch.py`
 - `copyright`
 - `cppcheck`
 - `cpplint`
@@ -760,6 +941,8 @@ ros2 bag record \
   /safety/stop \
   /safety/min_clearance \
   /safety/active_stop_distance \
+  /safety/cmd_vel_fresh \
+  /safety/markers \
   /cmd_vel_raw \
   /cmd_vel
 ```
@@ -793,12 +976,23 @@ Future measured results will include:
 - [x] Add dynamic release-distance validation
 - [x] Add five dynamic stopping-distance unit tests
 - [x] Validate dynamic stopping and safe recovery at runtime
+- [x] Add configurable command-velocity timeout protection
+- [x] Publish `/safety/cmd_vel_fresh`
+- [x] Publish zero velocity when commands become stale
+- [x] Immediately stop output when `/safety/stop` becomes true
+- [x] Add automated Velocity Guard launch integration testing
+- [x] Publish a dynamic RViz stopping-sector marker
+- [x] Display safety state, stopping distance, and clearance in RViz
+- [x] Display stale-lidar status in RViz
+- [x] Treat finite positive below-minimum lidar returns as hazards
+- [x] Add unit-test coverage for practical lidar-return handling
+- [x] Validate below-minimum obstacle handling at runtime
 - [x] Pass the complete build, test, and lint suite
 
 ## Next implementation parts
 
 1. Add reverse-direction protection with a rear lidar sector.
-2. Publish diagnostic status and an RViz safety-sector marker.
+2. Save a reusable RViz configuration file.
 3. Add a rosbag analysis script and measure safety-response latency.
 4. Add GitHub Actions for automatic build and test execution.
 5. Integrate the safety layer with TurtleBot3 Gazebo and Nav2.

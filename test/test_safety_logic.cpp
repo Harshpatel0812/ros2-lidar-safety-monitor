@@ -61,7 +61,7 @@ TEST(SafetyLogic, IgnoresObstacleOutsideFieldOfView)
     2.0F);
 }
 
-TEST(SafetyLogic, IgnoresInvalidRanges)
+TEST(SafetyLogic, IgnoresNonFiniteAndNonPositiveRanges)
 {
   const float nan =
     std::numeric_limits<float>::quiet_NaN();
@@ -70,8 +70,15 @@ TEST(SafetyLogic, IgnoresInvalidRanges)
     std::numeric_limits<float>::infinity();
 
   EXPECT_FLOAT_EQ(
-    evaluate({nan, nan, 1.0F, 0.05F, infinity}),
+    evaluate({nan, 0.0F, 1.0F, -0.5F, infinity}),
     1.0F);
+}
+
+TEST(SafetyLogic, TreatsPositiveBelowMinimumRangeAsHazard)
+{
+  EXPECT_FLOAT_EQ(
+    evaluate({3.0F, 2.0F, 0.05F, 1.0F, 3.0F}),
+    0.05F);
 }
 
 TEST(SafetyLogic, ReturnsInfinityWhenNoValidReadingExists)

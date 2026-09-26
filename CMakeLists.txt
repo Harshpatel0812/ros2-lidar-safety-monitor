@@ -12,6 +12,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 add_executable(
   safety_monitor_node
@@ -37,6 +38,7 @@ ament_target_dependencies(
   sensor_msgs
   std_msgs
   std_srvs
+  visualization_msgs
 )
 
 install(
@@ -90,6 +92,10 @@ if(BUILD_TESTING)
 
   add_launch_test(
     test/test_watchdog_launch.py
+    TIMEOUT 30
+  )
+  add_launch_test(
+    test/test_velocity_guard_launch.py
     TIMEOUT 30
   )
 endif()
