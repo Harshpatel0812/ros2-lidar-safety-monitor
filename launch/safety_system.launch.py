@@ -36,6 +36,7 @@ def generate_launch_description() -> LaunchDescription:
                 package='robot_safety_monitor',
                 executable='velocity_guard',
                 name='velocity_guard',
+                parameters=[parameters],
                 output='screen',
             ),
         ]

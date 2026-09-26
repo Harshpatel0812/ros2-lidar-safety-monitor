@@ -40,17 +40,31 @@ inline float minimum_range_in_sector(
 
     const float range = ranges[index];
 
-    const bool inside_sector =
-      std::abs(angle) <= half_field_of_view_rad;
-
-    const bool valid_range =
-      std::isfinite(range) &&
-      range >= range_min &&
-      range <= range_max;
-
-    if (inside_sector && valid_range) {
-      minimum = std::min(minimum, range);
+    if (std::abs(angle) > half_field_of_view_rad) {
+      continue;
     }
+
+    if (!std::isfinite(range)) {
+      continue;
+    }
+
+    if (range <= 0.0F) {
+      continue;
+    }
+
+    if (range > range_max) {
+      continue;
+    }
+
+    if (range < range_min) {
+      // A finite positive return below the documented minimum range may
+      // indicate an obstacle too close for reliable measurement. Treat it
+      // conservatively as a hazard instead of discarding it.
+      minimum = std::min(minimum, range);
+      continue;
+    }
+
+    minimum = std::min(minimum, range);
   }
 
   return minimum;

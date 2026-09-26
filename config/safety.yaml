@@ -8,3 +8,7 @@ safety_monitor:
     reaction_time: 0.25
     braking_deceleration: 0.80
     max_stop_distance: 1.50
+
+velocity_guard:
+  ros__parameters:
+    cmd_vel_timeout: 0.50
