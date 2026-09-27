@@ -18,7 +18,7 @@
 
 import copy
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -39,8 +39,24 @@ class VelocityGuard(Node):
             self.declare_parameter('cmd_vel_timeout', 0.50).value
         )
 
+        self._output_stamped = bool(
+            self.declare_parameter('output_stamped', False).value
+        )
+        self._output_frame_id = str(
+            self.declare_parameter(
+                'output_frame_id',
+                'base_link',
+            ).value
+        )
+
         if self._cmd_vel_timeout <= 0.0:
             raise ValueError('cmd_vel_timeout must be greater than zero')
+
+        if self._output_stamped and not self._output_frame_id:
+            raise ValueError(
+                'output_frame_id must not be empty '
+                'when output_stamped is true'
+            )
 
         safety_qos = QoSProfile(depth=1)
         safety_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -59,8 +75,12 @@ class VelocityGuard(Node):
             10,
         )
 
+        output_message_type = (
+            TwistStamped if self._output_stamped else Twist
+        )
+
         self._command_publisher = self.create_publisher(
-            Twist,
+            output_message_type,
             '/cmd_vel',
             10,
         )
@@ -81,9 +101,14 @@ class VelocityGuard(Node):
 
         self._set_command_freshness(False, force=True)
 
+        output_type = (
+            'TwistStamped' if self._output_stamped else 'Twist'
+        )
+
         self.get_logger().info(
             'Velocity guard ready; waiting for safety state and '
-            f'velocity commands (timeout={self._cmd_vel_timeout:.2f} s)'
+            f'velocity commands (timeout={self._cmd_vel_timeout:.2f} s, '
+            f'output={output_type})'
         )
 
     def _stop_callback(self, message: Bool) -> None:
@@ -109,7 +134,7 @@ class VelocityGuard(Node):
             self._publish_zero_velocity()
             return
 
-        self._command_publisher.publish(copy.deepcopy(desired))
+        self._publish_velocity(desired)
 
     def _watchdog_callback(self) -> None:
         """Publish zero velocity when the command stream becomes stale."""
@@ -129,9 +154,21 @@ class VelocityGuard(Node):
         if self._stopped or not command_fresh:
             self._publish_zero_velocity()
 
+    def _publish_velocity(self, command: Twist) -> None:
+        """Publish a Twist or stamped Twist using the configured format."""
+        if self._output_stamped:
+            output = TwistStamped()
+            output.header.stamp = self.get_clock().now().to_msg()
+            output.header.frame_id = self._output_frame_id
+            output.twist = copy.deepcopy(command)
+            self._command_publisher.publish(output)
+            return
+
+        self._command_publisher.publish(copy.deepcopy(command))
+
     def _publish_zero_velocity(self) -> None:
-        """Publish a zero Twist command."""
-        self._command_publisher.publish(Twist())
+        """Publish zero velocity using the configured output format."""
+        self._publish_velocity(Twist())
 
     def _set_command_freshness(
         self,
