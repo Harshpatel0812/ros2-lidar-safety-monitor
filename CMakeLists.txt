@@ -52,8 +52,18 @@ install(
 )
 
 install(
-  DIRECTORY launch config rviz
+  DIRECTORY
+    config
+    launch
+    rviz
+    worlds
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY
+    third_party/warehouse_simulation_toolkit
+  DESTINATION share/${PROJECT_NAME}/third_party
 )
 
 install(
