@@ -23,6 +23,13 @@
 namespace robot_safety_monitor
 {
 
+inline float normalize_angle(const float angle)
+{
+  constexpr float two_pi = 6.28318530717958647692F;
+
+  return std::remainder(angle, two_pi);
+}
+
 inline float minimum_range_in_sector(
   const std::vector<float> & ranges,
   const float angle_min,
@@ -34,17 +41,25 @@ inline float minimum_range_in_sector(
   float minimum = std::numeric_limits<float>::infinity();
 
   for (std::size_t index = 0; index < ranges.size(); ++index) {
-    const float angle =
+    const float raw_angle =
       angle_min +
       static_cast<float>(index) * angle_increment;
 
+    const float angle = normalize_angle(raw_angle);
     const float range = ranges[index];
 
     if (std::abs(angle) > half_field_of_view_rad) {
       continue;
     }
 
-    if (!std::isfinite(range)) {
+    if (std::isnan(range)) {
+      continue;
+    }
+
+    if (std::isinf(range)) {
+      if (range > 0.0F) {
+        minimum = std::min(minimum, range_max);
+      }
       continue;
     }
 
