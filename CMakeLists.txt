@@ -98,6 +98,10 @@ if(BUILD_TESTING)
     test/test_velocity_guard_launch.py
     TIMEOUT 30
   )
+  add_launch_test(
+    test/test_velocity_guard_stamped_launch.py
+    TIMEOUT 30
+  )
 endif()
 
 ament_package()
