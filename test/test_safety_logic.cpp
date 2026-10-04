@@ -23,6 +23,7 @@ namespace
 {
 
 constexpr float kPi = 3.14159265358979323846F;
+constexpr float kRangeMax = 10.0F;
 
 float evaluate(const std::vector<float> & ranges)
 {
@@ -31,8 +32,22 @@ float evaluate(const std::vector<float> & ranges)
     -kPi / 2.0F,
     kPi / 4.0F,
     0.1F,
-    10.0F,
+    kRangeMax,
     kPi / 4.0F);
+}
+
+float evaluate_full_scan(
+  const std::vector<float> & ranges,
+  const float angle_min,
+  const float angle_increment)
+{
+  return robot_safety_monitor::minimum_range_in_sector(
+    ranges,
+    angle_min,
+    angle_increment,
+    0.1F,
+    kRangeMax,
+    kPi / 6.0F);
 }
 
 double dynamic_distance(const double speed)
@@ -61,16 +76,16 @@ TEST(SafetyLogic, IgnoresObstacleOutsideFieldOfView)
     2.0F);
 }
 
-TEST(SafetyLogic, IgnoresNonFiniteAndNonPositiveRanges)
+TEST(SafetyLogic, IgnoresNaNAndNonPositiveRanges)
 {
-  const float nan =
-    std::numeric_limits<float>::quiet_NaN();
-
-  const float infinity =
-    std::numeric_limits<float>::infinity();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
 
   EXPECT_FLOAT_EQ(
-    evaluate({nan, 0.0F, 1.0F, -0.5F, infinity}),
+    evaluate({3.0F, nan, 1.0F, 0.0F, 3.0F}),
+    1.0F);
+
+  EXPECT_FLOAT_EQ(
+    evaluate({3.0F, -0.5F, 1.0F, 0.0F, 3.0F}),
     1.0F);
 }
 
@@ -83,12 +98,103 @@ TEST(SafetyLogic, TreatsPositiveBelowMinimumRangeAsHazard)
 
 TEST(SafetyLogic, ReturnsInfinityWhenNoValidReadingExists)
 {
-  const float nan =
-    std::numeric_limits<float>::quiet_NaN();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
 
-  EXPECT_TRUE(
-    std::isinf(
-      evaluate({nan, nan, nan, nan, nan})));
+  EXPECT_EQ(
+    evaluate({nan, nan, nan, nan, nan}),
+    std::numeric_limits<float>::infinity());
+}
+
+TEST(SafetyLogic, TreatsPositiveInfinityAsMaximumRange)
+{
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_FLOAT_EQ(
+    evaluate({infinity, infinity, infinity, infinity, infinity}),
+    kRangeMax);
+}
+
+TEST(SafetyLogic, FiniteObstacleWinsOverPositiveInfinity)
+{
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_FLOAT_EQ(
+    evaluate({infinity, infinity, 0.35F, infinity, infinity}),
+    0.35F);
+}
+
+TEST(SafetyLogic, RejectsNegativeInfinity)
+{
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_EQ(
+    evaluate({-infinity, -infinity, -infinity, -infinity, -infinity}),
+    infinity);
+}
+
+TEST(SafetyLogic, IgnoresFiniteReturnsAboveMaximumRange)
+{
+  EXPECT_FLOAT_EQ(
+    evaluate({3.0F, 11.0F, 2.0F, 12.0F, 3.0F}),
+    2.0F);
+}
+
+TEST(SafetyLogic, ReturnsInfinityForEmptyScan)
+{
+  EXPECT_EQ(
+    evaluate({}),
+    std::numeric_limits<float>::infinity());
+}
+
+TEST(SafetyLogic, OutsideSectorInfinityDoesNotClearInvalidSector)
+{
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_EQ(
+    evaluate({infinity, nan, nan, nan, infinity}),
+    infinity);
+}
+
+TEST(SafetyLogic, DetectsForwardObstacleNearEndOfZeroToTwoPiScan)
+{
+  std::vector<float> ranges(360, 5.0F);
+
+  // 350 degrees represents -10 degrees, inside the forward sector.
+  ranges[350] = 0.25F;
+
+  EXPECT_FLOAT_EQ(
+    evaluate_full_scan(ranges, 0.0F, kPi / 180.0F),
+    0.25F);
+}
+
+TEST(SafetyLogic, ExcludesRearObstacleInZeroToTwoPiScan)
+{
+  std::vector<float> ranges(360, 5.0F);
+
+  ranges[180] = 0.05F;
+
+  EXPECT_FLOAT_EQ(
+    evaluate_full_scan(ranges, 0.0F, kPi / 180.0F),
+    5.0F);
+}
+
+TEST(SafetyLogic, EquivalentScanAngleConventionsGiveSameClearance)
+{
+  std::vector<float> unsigned_ranges(360, 5.0F);
+  std::vector<float> signed_ranges(360, 5.0F);
+
+  // Both scans describe an obstacle at -10 degrees.
+  unsigned_ranges[350] = 0.35F;
+  signed_ranges[170] = 0.35F;
+
+  const float unsigned_result =
+    evaluate_full_scan(unsigned_ranges, 0.0F, kPi / 180.0F);
+  const float signed_result =
+    evaluate_full_scan(signed_ranges, -kPi, kPi / 180.0F);
+
+  EXPECT_FLOAT_EQ(unsigned_result, 0.35F);
+  EXPECT_FLOAT_EQ(signed_result, 0.35F);
 }
 
 TEST(DynamicStopDistance, ReturnsBaseDistanceAtZeroSpeed)
