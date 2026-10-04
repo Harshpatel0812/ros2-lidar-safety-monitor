@@ -20,6 +20,7 @@ import launch
 import launch_ros.actions
 import launch_testing
 import launch_testing.actions
+import launch_testing.asserts
 import pytest
 import rclpy
 from rclpy.qos import DurabilityPolicy
@@ -75,6 +76,11 @@ class TestVelocityGuardIntegration(unittest.TestCase):
             10,
         )
 
+        cls.heartbeat_state = True
+        cls.heartbeat_timer = cls.node.create_timer(
+            0.05,
+            cls.heartbeat_callback,
+        )
         cls.last_freshness = None
         cls.last_output = None
 
@@ -90,6 +96,12 @@ class TestVelocityGuardIntegration(unittest.TestCase):
             cls.output_callback,
             10,
         )
+
+    @classmethod
+    def heartbeat_callback(cls):
+        message = Bool()
+        message.data = cls.heartbeat_state
+        cls.stop_publisher.publish(message)
 
     @classmethod
     def tearDownClass(cls):
@@ -116,6 +128,7 @@ class TestVelocityGuardIntegration(unittest.TestCase):
         return False
 
     def publish_stop_state(self, stopped):
+        type(self).heartbeat_state = stopped
         message = Bool()
         message.data = stopped
 
@@ -221,4 +234,75 @@ class TestVelocityGuardIntegration(unittest.TestCase):
                 self.output_is_zero,
                 timeout=0.40,
             )
+        )
+
+    def test_z_safety_heartbeat_timeout(self):
+        """Block fresh commands when safety updates disappear."""
+        self.assertTrue(
+            self.wait_until(
+                lambda: self.command_publisher.get_subscription_count() > 0
+                and self.stop_publisher.get_subscription_count() > 0
+            )
+        )
+
+        self.publish_stop_state(False)
+        command_timer = self.node.create_timer(
+            0.05,
+            lambda: self.publish_command(0.12, 0.0),
+        )
+
+        try:
+            self.assertTrue(
+                self.wait_until(
+                    lambda: self.output_matches(0.12, 0.0)
+                )
+            )
+
+            # Simulate monitor loss while velocity commands keep arriving.
+            self.heartbeat_timer.cancel()
+
+            deadline = time.monotonic() + 0.8
+            while time.monotonic() < deadline:
+                rclpy.spin_once(self.node, timeout_sec=0.02)
+
+            type(self).last_output = None
+            self.assertTrue(
+                self.wait_until(self.output_is_zero, timeout=1.0)
+            )
+            self.assertIs(self.last_freshness, True)
+
+            # Check sustained blocking, not just one zero message.
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                rclpy.spin_once(self.node, timeout_sec=0.02)
+                self.assertTrue(self.output_is_zero())
+
+            # A restarted monitor initially reports STOP.
+            type(self).heartbeat_state = True
+            self.heartbeat_timer.reset()
+            deadline = time.monotonic() + 0.3
+            while time.monotonic() < deadline:
+                rclpy.spin_once(self.node, timeout_sec=0.02)
+                self.assertTrue(self.output_is_zero())
+
+            # Simulate a subsequently accepted explicit reset.
+            self.publish_stop_state(False)
+            self.assertTrue(
+                self.wait_until(
+                    lambda: self.output_matches(0.12, 0.0)
+                )
+            )
+        finally:
+            self.node.destroy_timer(command_timer)
+            self.publish_stop_state(True)
+
+
+@launch_testing.post_shutdown_test()
+class TestGuardShutdown(unittest.TestCase):
+    """Require a clean exit after the launch test shuts down the guard."""
+
+    def test_exit_code(self, proc_info, velocity_guard):
+        launch_testing.asserts.assertExitCodes(
+            proc_info,
+            process=velocity_guard,
         )

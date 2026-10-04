@@ -327,6 +327,8 @@ private:
     if (!scan_is_fresh()) {
       latch_stop("Lidar data timed out.");
     }
+    // Periodic state updates let the guard detect monitor loss.
+    publish_stop_state();
     publish_safety_markers();
   }
   bool scan_is_fresh()
