@@ -84,6 +84,7 @@ def generate_launch_description() -> LaunchDescription:
     robot_description = turtlebot_urdf.read_text()
 
     launch_rviz = LaunchConfiguration('launch_rviz')
+    launch_demo_driver = LaunchConfiguration('launch_demo_driver')
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     gazebo_server = IncludeLaunchDescription(
@@ -188,6 +189,23 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
+    demo_driver = Node(
+        package='robot_safety_monitor',
+        executable='warehouse_demo_driver',
+        name='warehouse_demo_driver',
+        output='screen',
+        parameters=[
+            {
+                'use_sim_time': use_sim_time,
+                'forward_speed': 0.10,
+                'turn_speed': 0.35,
+                'scan_timeout': 0.50,
+                'clearance_limit': 0.85,
+            }
+        ],
+        condition=IfCondition(launch_demo_driver),
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -217,6 +235,13 @@ def generate_launch_description() -> LaunchDescription:
                 default_value='true',
                 description='Use the Gazebo simulation clock.',
             ),
+            DeclareLaunchArgument(
+                'launch_demo_driver',
+                default_value='false',
+                description=(
+                    'Start the low-speed reactive warehouse driver.'
+                ),
+            ),
             AppendEnvironmentVariable(
                 'GZ_SIM_RESOURCE_PATH',
                 str(model_resource_path),
@@ -228,6 +253,7 @@ def generate_launch_description() -> LaunchDescription:
             gazebo_bridge,
             safety_monitor,
             velocity_guard,
+            demo_driver,
             rviz,
         ]
     )
