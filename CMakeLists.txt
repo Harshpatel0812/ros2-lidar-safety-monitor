@@ -78,6 +78,12 @@ install(
   RENAME demo_scan_publisher
 )
 
+install(
+  PROGRAMS scripts/warehouse_demo_driver.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME warehouse_demo_driver
+)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
