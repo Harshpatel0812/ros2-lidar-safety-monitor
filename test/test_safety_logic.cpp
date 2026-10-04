@@ -1,3 +1,17 @@
+// Copyright 2026 Harsh Patel
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -102,11 +116,11 @@ TEST(SafetyLogic, RejectsNegativeInfinity)
   EXPECT_TRUE(
     std::isinf(
       evaluate({
-        negative_infinity,
-        negative_infinity,
-        negative_infinity,
-        negative_infinity,
-        negative_infinity})));
+    negative_infinity,
+    negative_infinity,
+    negative_infinity,
+    negative_infinity,
+    negative_infinity})));
 }
 
 TEST(SafetyLogic, IgnoresFiniteReturnsAboveMaximumRange)
@@ -126,7 +140,7 @@ TEST(SafetyLogic, DetectsForwardObstacleNearEndOfZeroToTwoPiScan)
   EXPECT_FLOAT_EQ(
     evaluate(
       {5.0F, 5.0F, 5.0F, 5.0F,
-       5.0F, 5.0F, 5.0F, 0.35F},
+        5.0F, 5.0F, 5.0F, 0.35F},
       0.0F,
       kPi / 4.0F),
     0.35F);
@@ -146,13 +160,13 @@ TEST(SafetyLogic, EquivalentScanAngleConventionsGiveSameClearance)
 {
   const float from_negative_pi =
     evaluate(
-      {5.0F, 0.40F, 5.0F, 5.0F},
+    {5.0F, 0.40F, 5.0F, 5.0F},
       -kPi,
       kPi / 2.0F);
 
   const float from_zero_to_two_pi =
     evaluate(
-      {5.0F, 5.0F, 5.0F, 0.40F},
+    {5.0F, 5.0F, 5.0F, 0.40F},
       0.0F,
       kPi / 2.0F);
 
