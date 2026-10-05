@@ -23,15 +23,20 @@ namespace
 {
 
 constexpr float kPi = 3.14159265358979323846F;
+constexpr float kRangeMin = 0.10F;
+constexpr float kRangeMax = 10.0F;
 
-float evaluate(const std::vector<float> & ranges)
+float evaluate(
+  const std::vector<float> & ranges,
+  const float angle_min = -kPi / 2.0F,
+  const float angle_increment = kPi / 4.0F)
 {
   return robot_safety_monitor::minimum_range_in_sector(
     ranges,
-    -kPi / 2.0F,
-    kPi / 4.0F,
-    0.1F,
-    10.0F,
+    angle_min,
+    angle_increment,
+    kRangeMin,
+    kRangeMax,
     kPi / 4.0F);
 }
 
@@ -61,16 +66,12 @@ TEST(SafetyLogic, IgnoresObstacleOutsideFieldOfView)
     2.0F);
 }
 
-TEST(SafetyLogic, IgnoresNonFiniteAndNonPositiveRanges)
+TEST(SafetyLogic, IgnoresNaNAndNonPositiveRanges)
 {
-  const float nan =
-    std::numeric_limits<float>::quiet_NaN();
-
-  const float infinity =
-    std::numeric_limits<float>::infinity();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
 
   EXPECT_FLOAT_EQ(
-    evaluate({nan, 0.0F, 1.0F, -0.5F, infinity}),
+    evaluate({nan, 0.0F, 1.0F, -0.5F, nan}),
     1.0F);
 }
 
@@ -83,12 +84,93 @@ TEST(SafetyLogic, TreatsPositiveBelowMinimumRangeAsHazard)
 
 TEST(SafetyLogic, ReturnsInfinityWhenNoValidReadingExists)
 {
-  const float nan =
-    std::numeric_limits<float>::quiet_NaN();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+
+  EXPECT_TRUE(
+    std::isinf(evaluate({nan, nan, nan, nan, nan})));
+}
+
+TEST(SafetyLogic, TreatsPositiveInfinityAsMaximumRange)
+{
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_FLOAT_EQ(
+    evaluate({infinity, infinity, infinity, infinity, infinity}),
+    kRangeMax);
+}
+
+TEST(SafetyLogic, FiniteObstacleWinsOverPositiveInfinity)
+{
+  const float infinity = std::numeric_limits<float>::infinity();
+
+  EXPECT_FLOAT_EQ(
+    evaluate({infinity, 2.5F, infinity, infinity, infinity}),
+    2.5F);
+}
+
+TEST(SafetyLogic, RejectsNegativeInfinity)
+{
+  const float negative_infinity =
+    -std::numeric_limits<float>::infinity();
 
   EXPECT_TRUE(
     std::isinf(
-      evaluate({nan, nan, nan, nan, nan})));
+      evaluate({
+    negative_infinity,
+    negative_infinity,
+    negative_infinity,
+    negative_infinity,
+    negative_infinity})));
+}
+
+TEST(SafetyLogic, IgnoresFiniteReturnsAboveMaximumRange)
+{
+  EXPECT_TRUE(
+    std::isinf(
+      evaluate({11.0F, 12.0F, 13.0F, 14.0F, 15.0F})));
+}
+
+TEST(SafetyLogic, ReturnsInfinityForEmptyScan)
+{
+  EXPECT_TRUE(std::isinf(evaluate({})));
+}
+
+TEST(SafetyLogic, DetectsForwardObstacleNearEndOfZeroToTwoPiScan)
+{
+  EXPECT_FLOAT_EQ(
+    evaluate(
+      {5.0F, 5.0F, 5.0F, 5.0F,
+        5.0F, 5.0F, 5.0F, 0.35F},
+      0.0F,
+      kPi / 4.0F),
+    0.35F);
+}
+
+TEST(SafetyLogic, ExcludesRearObstacleInZeroToTwoPiScan)
+{
+  EXPECT_FLOAT_EQ(
+    evaluate(
+      {5.0F, 5.0F, 0.20F, 5.0F},
+      0.0F,
+      kPi / 2.0F),
+    5.0F);
+}
+
+TEST(SafetyLogic, EquivalentScanAngleConventionsGiveSameClearance)
+{
+  const float from_negative_pi =
+    evaluate(
+    {5.0F, 0.40F, 5.0F, 5.0F},
+      -kPi,
+      kPi / 2.0F);
+
+  const float from_zero_to_two_pi =
+    evaluate(
+    {5.0F, 5.0F, 5.0F, 0.40F},
+      0.0F,
+      kPi / 2.0F);
+
+  EXPECT_FLOAT_EQ(from_negative_pi, from_zero_to_two_pi);
 }
 
 TEST(DynamicStopDistance, ReturnsBaseDistanceAtZeroSpeed)

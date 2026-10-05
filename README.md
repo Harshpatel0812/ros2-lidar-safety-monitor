@@ -12,7 +12,9 @@ commands with zero velocity.
 
 The project includes C++ unit tests for lidar processing and dynamic stopping,
 plus ROS 2 launch integration tests for lidar-watchdog behavior and
-velocity-command timeout protection. RViz markers display the active stopping
+velocity-command timeout and safety-heartbeat protection in both Twist output
+formats. The TurtleBot3 warehouse demo includes an optional low-speed reactive
+driver. RViz markers display the active stopping
 zone, minimum clearance, lidar health, and latched safety state.
 
 ## What this project showcases
@@ -85,7 +87,7 @@ Nav2 or teleop → /cmd_vel_raw → velocity guard → /cmd_vel → robot
 | `/safety/cmd_vel_fresh` | `std_msgs/msg/Bool` | Reports whether the raw velocity command is recent |
 | `/safety/markers` | `visualization_msgs/msg/MarkerArray` | Publishes the dynamic RViz safety zone and status text |
 | `/safety/reset` | `std_srvs/srv/Trigger` | Clears the latch only when reset conditions are safe |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | Sends guarded velocity commands to the robot base |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` or `geometry_msgs/msg/TwistStamped` | Sends guarded commands; the warehouse launch selects stamped output |
 
 ## Safety configuration
 
@@ -106,6 +108,9 @@ safety_monitor:
 velocity_guard:
   ros__parameters:
     cmd_vel_timeout: 0.50
+    safety_state_timeout: 0.50
+    output_stamped: false
+    output_frame_id: base_link
 ```
 
 | Parameter | Node | Value | Purpose |
@@ -118,6 +123,10 @@ velocity_guard:
 | `braking_deceleration` | Safety Monitor | 0.80 m/s² | Assumed available braking deceleration |
 | `max_stop_distance` | Safety Monitor | 1.50 m | Maximum permitted dynamic stopping threshold |
 | `cmd_vel_timeout` | Velocity Guard | 0.50 s | Maximum permitted age of the latest raw velocity command |
+
+The guard also accepts `safety_state_timeout` (0.50 s), `output_stamped`
+(default `false`), and `output_frame_id` (default `base_link`). The warehouse
+launch overrides `output_stamped` to `true` for its ROS–Gazebo bridge.
 
 Keeping these values in YAML allows the safety behavior to be adjusted for
 different robots and sensors without recompiling either node.
@@ -188,8 +197,9 @@ least `0.88125 m` of valid forward clearance.
 - **Forward field of view:** the robot monitors the region relevant to forward
   motion instead of stopping for obstacles behind it. The angle is configurable.
 
-- **Conservative lidar-return handling:** `NaN`, infinite, zero, negative, and
-  above-maximum readings are ignored individually. A finite positive reading
+- **Conservative lidar-return handling:** `NaN`, negative infinity, zero, negative, and
+  finite above-maximum readings are ignored individually. Positive infinity
+  contributes `range_max` as clear space. A finite positive reading
   below `range_min` is retained as a possible obstacle that is too close for
   reliable measurement.
 
@@ -226,9 +236,14 @@ least `0.88125 m` of valid forward clearance.
 - **Validated reset service:** reset is rejected if lidar data is missing,
   stale, invalid, or an obstacle remains inside the active release distance.
 
-- **Transient-local state QoS:** a late-starting velocity guard immediately
-  receives the most recent stop state. Monitoring tools can also obtain the
-  latest active stopping distance and visualization state.
+- **State QoS and live heartbeats:** the monitor publishes reliable,
+  transient-local state every 100 ms. Monitoring tools can obtain retained
+  state, while the guard deliberately uses a volatile subscription and waits
+  for a live update. A retained historical clear state cannot enable startup.
+
+- **Safety-monitor heartbeat watchdog:** the guard blocks commands if safety
+  updates disappear for longer than `safety_state_timeout`, even while raw
+  commands remain fresh. Its command and heartbeat timers use a steady clock.
 
 - **RViz MarkerArray visualization:** the stopping-zone radius is generated
   from the real dynamic threshold. Green indicates a clear state, red indicates
@@ -256,15 +271,25 @@ robot_safety_monitor/
 ├── include/robot_safety_monitor/
 │   └── safety_logic.hpp
 ├── launch/
-│   └── safety_system.launch.py
+│   ├── safety_system.launch.py
+│   ├── gazebo_safety_system.launch.py
+│   └── warehouse_safety_demo.launch.py
 ├── scripts/
 │   ├── demo_scan_publisher.py
-│   └── velocity_guard.py
+│   ├── velocity_guard.py
+│   └── warehouse_demo_driver.py
+├── rviz/
+│   └── safety_monitor.rviz
+├── worlds/
+│   └── warehouse_safety_demo.sdf
+├── third_party/
+│   └── warehouse_simulation_toolkit/
 ├── src/
 │   └── safety_monitor.cpp
 ├── test/
 │   ├── test_safety_logic.cpp
 │   ├── test_velocity_guard_launch.py
+│   ├── test_velocity_guard_stamped_launch.py
 │   └── test_watchdog_launch.py
 ├── CMakeLists.txt
 ├── LICENSE
@@ -439,11 +464,14 @@ graph.
 
 ### Lidar-processing tests
 
-The five `SafetyLogic` tests verify that the calculation:
+The 13 `SafetyLogic` tests verify that the calculation:
 
 - Finds the closest frontal obstacle
 - Ignores obstacles outside the configured field of view
-- Ignores `NaN`, infinity, zero, and negative readings
+- Ignores `NaN`, negative infinity, zero, and negative readings
+- Treats positive infinity as `range_max` and retains closer finite obstacles
+- Rejects finite returns above `range_max`
+- Handles empty scans and wrapped scan angles
 - Treats a finite positive return below `range_min` as a hazard
 - Returns infinity when no usable reading exists
 
@@ -460,8 +488,8 @@ The five `DynamicStopDistance` tests verify that the calculation:
 Validated result:
 
 ```text
-Running 10 tests from 2 test suites.
-[  PASSED  ] 10 tests.
+Running 18 tests from 2 test suites.
+[  PASSED  ] 18 tests.
 ```
 
 ## Part 3 — Lidar watchdog and fail-safe recovery
@@ -872,7 +900,8 @@ extremely close to the robot. The project therefore applies this policy:
 
 | Reading | Treatment |
 | --- | --- |
-| `NaN` or infinity | Ignore the individual reading |
+| `NaN` or negative infinity | Ignore the individual reading |
+| Positive infinity | Use `range_max` as clear space |
 | Zero or negative | Ignore the individual reading |
 | Greater than `range_max` | Ignore the individual reading |
 | Finite, positive, below `range_min` | Retain as a possible close obstacle |
@@ -903,14 +932,14 @@ the remaining valid background readings produce a 5.0 m minimum clearance.
 
 ## Complete automated-test result
 
-The complete package suite includes C++ unit tests, two launch integration
-tests, and ROS lint checks.
+The complete package suite includes 18 C++ unit tests, three launch integration
+test entries, and ROS lint checks. Both guard output formats include safety
+heartbeat-loss coverage while raw commands remain fresh.
 
-Validated output:
+Results reported from the development workstation on October 5, 2026:
 
 ```text
-100% tests passed, 0 tests failed out of 11
-Summary: 50 tests, 0 errors, 0 failures, 3 skipped
+Summary: 60 tests, 0 errors, 0 failures, 3 skipped
 ```
 
 The checks include:
@@ -918,6 +947,7 @@ The checks include:
 - `test_safety_logic`
 - `test_test_watchdog_launch.py`
 - `test_test_velocity_guard_launch.py`
+- `test_test_velocity_guard_stamped_launch.py`
 - `copyright`
 - `cppcheck`
 - `cpplint`
@@ -930,6 +960,100 @@ The checks include:
 The cppcheck wrapper may report that cppcheck 2.13 is skipped because of known
 performance issues. The ROS test wrapper treats this as an intentional skip, not
 a test failure.
+
+## Part 9 — TurtleBot3 warehouse demonstration
+
+The warehouse launch starts Gazebo, spawns a TurtleBot3 Burger, bridges lidar,
+odometry, transforms and commands, and starts the monitor and velocity guard.
+It loads the saved RViz configuration and uses simulation time by default.
+The bridge receives `TwistStamped` on `/cmd_vel`; controllers still publish
+`Twist` on `/cmd_vel_raw`.
+
+Prerequisites: ROS 2 Jazzy, `ros_gz_sim`, `ros_gz_bridge`, RViz, and a built
+TurtleBot3 Gazebo workspace. The commands below use `~/turtlebot3_ws`.
+
+### Terminal 1: build and launch
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/turtlebot3_ws/install/setup.bash
+cd ~/robotics_ws
+
+colcon build --symlink-install --packages-select robot_safety_monitor
+source install/setup.bash
+
+ros2 launch robot_safety_monitor warehouse_safety_demo.launch.py \
+  launch_rviz:=true launch_demo_driver:=true
+```
+
+`launch_demo_driver` defaults to `false`. Set it to `false` for manual
+commands. `launch_rviz:=false` disables RViz; Gazebo's GUI still launches.
+
+### Terminal 2: clear the startup latch
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/turtlebot3_ws/install/setup.bash
+source ~/robotics_ws/install/setup.bash
+
+ros2 topic echo /safety/min_clearance --once
+ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
+```
+
+The optional driver waits for scans and a cleared safety state. It publishes
+at 10 Hz, drives at 0.10 m/s, and turns toward the clearer side when frontal
+clearance falls below 0.85 m. Its turn speed is 0.35 rad/s. This is a reactive
+simulation demonstration; it does not perform SLAM, goal planning or Nav2
+navigation.
+
+### Inspect motion and safety
+
+```bash
+ros2 topic echo /cmd_vel --once --field twist
+ros2 topic echo /odom --once --field twist.twist
+ros2 topic echo /safety/active_stop_distance --once
+ros2 topic echo /safety/stop \
+  --qos-durability transient_local --qos-reliability reliable --once
+ros2 topic echo /safety/cmd_vel_fresh \
+  --qos-durability transient_local --qos-reliability reliable --once
+```
+
+At a requested 0.10 m/s, the dynamic stop threshold is 0.48125 m.
+Command freshness alone does not imply that motion is enabled: the guard
+also requires fresh safety updates and a clear stop state.
+
+### RViz marker timing
+
+Use `odom` as Fixed Frame. For a close robot-following view, set the Orbit
+Target Frame to `base_link` and adjust Distance to approximately 3–6 m.
+If the RobotModel is absent, select `/robot_description` as its Description
+Topic.
+
+The safety sector and status text use the scan frame, a zero timestamp for
+the latest available transform, and `frame_locked = true`. This avoids
+requesting a newer transform than the bridge has supplied and keeps the
+overlays attached to the robot. Scan timestamps and safety timing are unchanged.
+Markers retain a 0.30-second lifetime.
+
+### Observed simulation results
+
+These are manual observations, not latency measurements.
+
+| Scenario | Observed result |
+| --- | --- |
+| Startup with valid clear lidar | Explicit reset cleared the latch |
+| Fresh 0.10 m/s command | Odometry reported approximately 0.10 m/s |
+| Command publisher stopped | Guard published zero; odometry returned to zero |
+| Test box initially ahead | Clearance approximately 0.77 m |
+| Driving toward the box | Stop latched near 0.486 m; odometry was zero |
+| Reset with the box still close | Rejected inside the release distance |
+| Box moved out of the lidar plane | Clearance approximately 2.65 m; stop remained latched |
+| Explicit reset after clearance recovered | Accepted; stop became false |
+
+The latest marker change passed the lidar-watchdog integration test,
+`cpplint`, and `uncrustify`. Sampled recording frames showed the green
+overlays remaining visible; the MarkerArray status panel was not visible,
+so continuous absence of RViz errors was not established from that recording.
 
 ## Demo experiment and measurable results
 
@@ -987,20 +1111,31 @@ Future measured results will include:
 - [x] Treat finite positive below-minimum lidar returns as hazards
 - [x] Add unit-test coverage for practical lidar-return handling
 - [x] Validate below-minimum obstacle handling at runtime
-- [x] Pass the complete build, test, and lint suite
+- [x] Add wrapped-angle and positive-infinity lidar handling
+- [x] Support TwistStamped output for the Gazebo bridge
+- [x] Stop output when safety-monitor heartbeats expire
+- [x] Test heartbeat loss in both output formats
+- [x] Add the warehouse world and saved RViz configuration
+- [x] Add an optional low-speed warehouse demo driver
+- [x] Validate obstacle stopping and explicit recovery in Gazebo
+- [x] Use latest transforms for robot-relative RViz markers
+- [x] Pass the required tests and lint checks (cppcheck skipped)
 
 ## Next implementation parts
 
-1. Add reverse-direction protection with a rear lidar sector.
-2. Save a reusable RViz configuration file.
-3. Add a rosbag analysis script and measure safety-response latency.
-4. Add GitHub Actions for automatic build and test execution.
-5. Integrate the safety layer with TurtleBot3 Gazebo and Nav2.
-6. Record a repeatable portfolio demonstration.
+1. Add reverse-direction and rotational collision protection.
+2. Improve reactive-driver validation and add behavior tests.
+3. Add moving warehouse actors and validate dynamic-obstacle scenarios.
+4. Add a rosbag analysis script and measure safety-response latency.
+5. Add GitHub Actions for automatic build and test execution.
+6. Integrate Nav2, SLAM, and localization for planned routes.
+7. Record a repeatable portfolio demonstration with measured results.
 
 Project 2 will reuse this safety layer below Nav2 while adding SLAM,
 localization, ArUco perception, and a behavior tree.
 
 ## License
 
-This project is licensed under the Apache License 2.0. See `LICENSE` for details.
+Project code is licensed under the Apache License 2.0. See `LICENSE` for details.
+Vendored warehouse assets retain their upstream license notices under
+`third_party/warehouse_simulation_toolkit`.

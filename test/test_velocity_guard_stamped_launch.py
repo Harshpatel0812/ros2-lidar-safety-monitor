@@ -16,6 +16,7 @@ import time
 import unittest
 
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 import launch
 import launch_ros.actions
 import launch_testing
@@ -29,16 +30,30 @@ from rclpy.qos import ReliabilityPolicy
 from std_msgs.msg import Bool
 
 
+STOP_TOPIC = '/stamped_test/safety/stop'
+RAW_COMMAND_TOPIC = '/stamped_test/cmd_vel_raw'
+OUTPUT_TOPIC = '/stamped_test/cmd_vel'
+FRESHNESS_TOPIC = '/stamped_test/safety/cmd_vel_fresh'
+
+
 @pytest.mark.launch_test
 def generate_test_description():
     velocity_guard = launch_ros.actions.Node(
         package='robot_safety_monitor',
         executable='velocity_guard',
-        name='velocity_guard',
+        name='velocity_guard_stamped',
         parameters=[
             {
                 'cmd_vel_timeout': 0.50,
+                'output_stamped': True,
+                'output_frame_id': 'base_link',
             }
+        ],
+        remappings=[
+            ('/safety/stop', STOP_TOPIC),
+            ('/cmd_vel_raw', RAW_COMMAND_TOPIC),
+            ('/cmd_vel', OUTPUT_TOPIC),
+            ('/safety/cmd_vel_fresh', FRESHNESS_TOPIC),
         ],
         output='screen',
     )
@@ -54,12 +69,14 @@ def generate_test_description():
     )
 
 
-class TestVelocityGuardIntegration(unittest.TestCase):
+class TestVelocityGuardStampedIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         rclpy.init()
-        cls.node = rclpy.create_node('velocity_guard_integration_test')
+        cls.node = rclpy.create_node(
+            'velocity_guard_stamped_integration_test'
+        )
 
         safety_qos = QoSProfile(depth=1)
         safety_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -67,12 +84,12 @@ class TestVelocityGuardIntegration(unittest.TestCase):
 
         cls.stop_publisher = cls.node.create_publisher(
             Bool,
-            '/safety/stop',
+            STOP_TOPIC,
             safety_qos,
         )
         cls.command_publisher = cls.node.create_publisher(
             Twist,
-            '/cmd_vel_raw',
+            RAW_COMMAND_TOPIC,
             10,
         )
 
@@ -86,13 +103,13 @@ class TestVelocityGuardIntegration(unittest.TestCase):
 
         cls.freshness_subscription = cls.node.create_subscription(
             Bool,
-            '/safety/cmd_vel_fresh',
+            FRESHNESS_TOPIC,
             cls.freshness_callback,
             safety_qos,
         )
         cls.output_subscription = cls.node.create_subscription(
-            Twist,
-            '/cmd_vel',
+            TwistStamped,
+            OUTPUT_TOPIC,
             cls.output_callback,
             10,
         )
@@ -149,26 +166,36 @@ class TestVelocityGuardIntegration(unittest.TestCase):
         tolerance = 1e-6
 
         return (
-            abs(self.last_output.linear.x - linear_x) < tolerance
-            and abs(self.last_output.angular.z - angular_z) < tolerance
+            abs(self.last_output.twist.linear.x - linear_x) < tolerance
+            and abs(
+                self.last_output.twist.angular.z - angular_z
+            ) < tolerance
         )
 
     def output_is_zero(self):
         if self.last_output is None:
             return False
 
+        twist = self.last_output.twist
         values = [
-            self.last_output.linear.x,
-            self.last_output.linear.y,
-            self.last_output.linear.z,
-            self.last_output.angular.x,
-            self.last_output.angular.y,
-            self.last_output.angular.z,
+            twist.linear.x,
+            twist.linear.y,
+            twist.linear.z,
+            twist.angular.x,
+            twist.angular.y,
+            twist.angular.z,
         ]
 
         return all(abs(value) < 1e-6 for value in values)
 
-    def test_velocity_command_watchdog(self):
+    def stamp_is_valid(self):
+        if self.last_output is None:
+            return False
+
+        stamp = self.last_output.header.stamp
+        return stamp.sec > 0 or stamp.nanosec > 0
+
+    def test_stamped_velocity_output(self):
         self.assertTrue(
             self.wait_until(
                 lambda: self.stop_publisher.get_subscription_count() > 0
@@ -190,7 +217,7 @@ class TestVelocityGuardIntegration(unittest.TestCase):
         )
 
         self.publish_stop_state(False)
-        self.publish_command(0.60, 0.20)
+        self.publish_command(0.35, -0.15)
 
         self.assertTrue(
             self.wait_until(
@@ -199,42 +226,29 @@ class TestVelocityGuardIntegration(unittest.TestCase):
         )
         self.assertTrue(
             self.wait_until(
-                lambda: self.output_matches(0.60, 0.20)
+                lambda: self.output_matches(0.35, -0.15)
             )
         )
 
-        self.assertTrue(
-            self.wait_until(
-                lambda: self.last_freshness is False,
-                timeout=2.0,
-            )
+        self.assertEqual(
+            self.last_output.header.frame_id,
+            'base_link',
         )
-        self.assertTrue(
-            self.wait_until(self.output_is_zero)
-        )
-
-        self.publish_command(0.40, -0.10)
-
-        self.assertTrue(
-            self.wait_until(
-                lambda: self.last_freshness is True
-            )
-        )
-        self.assertTrue(
-            self.wait_until(
-                lambda: self.output_matches(0.40, -0.10)
-            )
-        )
+        self.assertTrue(self.stamp_is_valid())
 
         self.publish_stop_state(True)
 
-        self.assertIs(self.last_freshness, True)
         self.assertTrue(
             self.wait_until(
                 self.output_is_zero,
                 timeout=0.40,
             )
         )
+        self.assertEqual(
+            self.last_output.header.frame_id,
+            'base_link',
+        )
+        self.assertTrue(self.stamp_is_valid())
 
     def test_z_safety_heartbeat_timeout(self):
         """Block fresh commands when safety updates disappear."""

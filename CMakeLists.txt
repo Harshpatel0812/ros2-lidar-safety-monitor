@@ -52,8 +52,18 @@ install(
 )
 
 install(
-  DIRECTORY launch config
+  DIRECTORY
+    config
+    launch
+    rviz
+    worlds
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY
+    third_party/warehouse_simulation_toolkit
+  DESTINATION share/${PROJECT_NAME}/third_party
 )
 
 install(
@@ -66,6 +76,12 @@ install(
   PROGRAMS scripts/demo_scan_publisher.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME demo_scan_publisher
+)
+
+install(
+  PROGRAMS scripts/warehouse_demo_driver.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME warehouse_demo_driver
 )
 
 if(BUILD_TESTING)
@@ -96,6 +112,10 @@ if(BUILD_TESTING)
   )
   add_launch_test(
     test/test_velocity_guard_launch.py
+    TIMEOUT 30
+  )
+  add_launch_test(
+    test/test_velocity_guard_stamped_launch.py
     TIMEOUT 30
   )
 endif()
