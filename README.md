@@ -1139,4 +1139,3 @@ localization, ArUco perception, and a behavior tree.
 Project code is licensed under the Apache License 2.0. See `LICENSE` for details.
 Vendored warehouse assets retain their upstream license notices under
 `third_party/warehouse_simulation_toolkit`.
-
