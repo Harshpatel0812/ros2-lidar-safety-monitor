@@ -192,11 +192,13 @@ private:
     }
     const double stop_radius = active_stop_distance();
     const bool lidar_fresh = scan_is_fresh();
-    const auto marker_stamp = now();
+    // These robot-relative overlays use the latest available transform.
+    const auto marker_stamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
     visualization_msgs::msg::MarkerArray marker_array;
     visualization_msgs::msg::Marker safety_zone;
     safety_zone.header.frame_id = last_scan_frame_id_;
     safety_zone.header.stamp = marker_stamp;
+    safety_zone.frame_locked = true;
     safety_zone.ns = "dynamic_stop_zone";
     safety_zone.id = 0;
     safety_zone.type =
@@ -241,6 +243,7 @@ private:
     visualization_msgs::msg::Marker status_text;
     status_text.header.frame_id = last_scan_frame_id_;
     status_text.header.stamp = marker_stamp;
+    status_text.frame_locked = true;
     status_text.ns = "safety_status";
     status_text.id = 1;
     status_text.type =
